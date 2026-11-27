@@ -20,6 +20,9 @@ import { EnvironmentBiome, GraphicsQuality } from '../core/SandParams';
 import { getGraphicsQualityBudget } from '../core/GraphicsQualityBudget';
 import {
   BiomeReflectionBounds,
+  ReflectionCubeScheduleDecision,
+  ReflectionCubeScheduleInput,
+  ReflectionCubeScheduler,
   computeBiomeReflectionBoundsInto,
 } from '../core/ReflectionRayMath';
 import {
@@ -176,7 +179,6 @@ void main() {
 const _camToMirror = new THREE.Vector3();
 const _mirrorTarget = new THREE.Vector3();
 const _probeWorldPos = new THREE.Vector3();
-const _prevProbePos = new THREE.Vector3(1e6, 1e6, 1e6);
 const _boundsScratch: BiomeReflectionBounds = {
   minX: -24,
   minY: 0,
@@ -201,6 +203,36 @@ const _reflLodScratch: ReflectionLodProfile = {
   mirrorIntervalMs: 16.2,
   mirrorViewportScale: 1,
   mirrorFar: 155,
+};
+const _cubeSchedInputScratch: ReflectionCubeScheduleInput = {
+  nowMs: 0,
+  probeX: 0,
+  probeY: 1.18,
+  probeZ: 0,
+  groundPlaneY: 0,
+  biome: 'desert',
+  isLowTier: false,
+  vehicleSpeedMs: 0,
+  facesPerFrame: 2,
+  minMovedDistSq: 0.64,
+  fastMovedDistSq: 0.36,
+  minCooldownFrames: 2,
+  fastCooldownFrames: 2,
+  cooldownMult: 1,
+  minCycleIntervalMs: 48,
+  pmremMinIntervalMs: 180,
+  hasPmrem: false,
+  forceFullPrime: false,
+};
+const _cubeSchedDecisionScratch: ReflectionCubeScheduleDecision = {
+  action: 'idle',
+  faceStart: 0,
+  faceCount: 0,
+  captureX: 0,
+  captureY: 1.18,
+  captureZ: 0,
+  completesCycle: false,
+  shouldBakePmrem: false,
 };
 
 export class VehicleReflectionSystem {
@@ -233,15 +265,15 @@ export class VehicleReflectionSystem {
   private readonly isSoftwareGl: boolean;
   private readonly isMobile: boolean;
 
-  private cubeRT: THREE.WebGLCubeRenderTarget | null = null;
-  private cubeCamera: THREE.CubeCamera | null = null;
+  private cubeRTs: [THREE.WebGLCubeRenderTarget | null, THREE.WebGLCubeRenderTarget | null] = [
+    null,
+    null,
+  ];
+  private cubeCameras: [THREE.CubeCamera | null, THREE.CubeCamera | null] = [null, null];
+  private cubeReadIdx: 0 | 1 = 0;
   private pmremGenerator: THREE.PMREMGenerator | null = null;
   private pmremRT: THREE.WebGLCubeRenderTarget | null = null;
-  private cubeFaceCursor = 0;
-  private cubeNeedsPrime = true;
-  private pmremPending = false;
-  private framesSinceCubeCycle = 999;
-  private lastCubeCycleMs = -1e6;
+  private readonly cubeScheduler = new ReflectionCubeScheduler();
 
   private leftMirrorRT: THREE.WebGLRenderTarget | null = null;
   private rightMirrorRT: THREE.WebGLRenderTarget | null = null;
@@ -257,7 +289,7 @@ export class VehicleReflectionSystem {
   private lastLeftMirrorAdjustSig = NaN;
   private lastRightMirrorAdjustSig = NaN;
   private lastInteriorMirrorAdjustSig = NaN;
-  private currentCubeFar = 940;
+  private currentCubeFar: [number, number] = [940, 940];
   private currentMirrorFar = 260;
 
   private readonly fallbackTex: THREE.DataTexture;
@@ -324,7 +356,7 @@ export class VehicleReflectionSystem {
   }
 
   public markDirty(): void {
-    this.cubeNeedsPrime = true;
+    this.cubeScheduler.markDirty();
   }
 
   public getDynamicEnvMap(): THREE.Texture | null {
@@ -336,8 +368,8 @@ export class VehicleReflectionSystem {
   }
 
   public getProbeModeLabel(): string {
-    if (this.quality === 'low') return 'Cube 128² RT Estático';
-    return this.quality === 'ultra' ? 'Cube 256² RT (2 faces/f)' : 'Cube 128² RT (1 face/f)';
+    if (this.quality === 'low') return 'Cube 128² Estático';
+    return this.quality === 'ultra' ? 'Cube 256²×2 (3 faces/f)' : 'Cube 128²×2 (2 faces/f)';
   }
 
   private ensureMirrorTargets(): void {
@@ -376,10 +408,13 @@ export class VehicleReflectionSystem {
   }
 
   private rebuildTargets(): void {
-    if (this.cubeRT) {
-      this.cubeRT.dispose();
-      this.cubeRT = null;
-      this.cubeCamera = null;
+    for (let i = 0; i < 2; i++) {
+      const rt = this.cubeRTs[i];
+      if (rt) {
+        rt.dispose();
+        this.cubeRTs[i] = null;
+      }
+      this.cubeCameras[i] = null;
     }
     if (this.pmremRT) {
       this.pmremRT.dispose();
@@ -406,34 +441,37 @@ export class VehicleReflectionSystem {
     this.rightMirrorMaterial.uniforms.uLiveEnabled.value = 0.0;
     this.interiorMirrorMaterial.uniforms.uLiveEnabled.value = 0.0;
 
-    // Allocate a linear HalfFloat mipmapped CubeCamera probe on ALL tiers:
-    //  - low / SoftwareGL: 128² captured ONCE on init / biome / weather / sun change (0ms/frame steady state!)
-    //  - hybrid: 128² time-sliced 1 face/frame when moving, frozen when stationary
-    //  - ultra: 256² time-sliced 2 faces/frame when moving
+    // Allocate linear HalfFloat mipmapped CubeCamera probes:
+    //  - low / SoftwareGL: single 128² captured ONCE on init / biome / weather / sun change (0ms/frame steady state!)
+    //  - hybrid: ping-pong double-buffered 128²×2 (2 faces/frame, atomic swap + complete mipmaps)
+    //  - ultra: ping-pong double-buffered 256²×2 (3 faces/frame, atomic swap + complete mipmaps)
     const cubeSize = this.quality === 'ultra' ? 256 : 128;
-    this.cubeRT = new THREE.WebGLCubeRenderTarget(cubeSize, {
-      type: THREE.HalfFloatType,
-      format: THREE.RGBAFormat,
-      generateMipmaps: true,
-      minFilter: THREE.LinearMipmapLinearFilter,
-      magFilter: THREE.LinearFilter,
-    });
-    this.cubeCamera = new THREE.CubeCamera(0.35, 940, this.cubeRT);
-    this.currentCubeFar = 940;
-    // Keep all 6 CubeCamera sub-cameras on Layer 0 so dense grass/particles/rain are excluded from reflection captures
-    this.cubeCamera.layers.set(0);
-    for (const child of this.cubeCamera.children) {
-      child.layers.set(0);
+    const bufferCount = this.quality === 'low' ? 1 : 2;
+    for (let i = 0; i < bufferCount; i++) {
+      const rt = new THREE.WebGLCubeRenderTarget(cubeSize, {
+        type: THREE.HalfFloatType,
+        format: THREE.RGBAFormat,
+        generateMipmaps: true,
+        minFilter: THREE.LinearMipmapLinearFilter,
+        magFilter: THREE.LinearFilter,
+      });
+      const cam = new THREE.CubeCamera(0.35, 940, rt);
+      // Keep all 6 CubeCamera sub-cameras on Layer 0 so dense grass/particles/rain are excluded from reflection captures
+      cam.layers.set(0);
+      for (const child of cam.children) {
+        child.layers.set(0);
+      }
+      this.cubeRTs[i] = rt;
+      this.cubeCameras[i] = cam;
     }
-    this.cubeFaceCursor = 0;
-    this.cubeNeedsPrime = true;
-    this.pmremPending = false;
-    this.framesSinceCubeCycle = 999;
-    this.lastCubeCycleMs = -1e6;
+    this.cubeReadIdx = 0;
+    this.currentCubeFar[0] = 940;
+    this.currentCubeFar[1] = 940;
+    this.cubeScheduler.reset();
     this.lastLeftMirrorMs = -1e6;
     this.lastRightMirrorMs = -1e6;
     this.lastInteriorMirrorMs = -1e6;
-    this.sharedUniforms.uEnvCubeRaw.value = this.cubeRT.texture;
+    this.sharedUniforms.uEnvCubeRaw.value = this.cubeRTs[0] ? this.cubeRTs[0].texture : null;
     this.sharedUniforms.uHasRawCube.value = 0.0;
     this.sharedUniforms.uRawCubeMaxMip.value = Math.log2(cubeSize);
     this.sharedUniforms.uPccEnabled.value = 1.0;
@@ -463,21 +501,6 @@ export class VehicleReflectionSystem {
       forceFullPrime,
     } = params;
 
-    // Sync live environment & asymmetric ground-anchored reflection proxy bounds every frame (zero allocation)
-    const bounds = computeBiomeReflectionBoundsInto(
-      biome,
-      vehiclePos.x,
-      groundPlaneY,
-      vehiclePos.z,
-      _boundsScratch,
-    );
-    this.sharedUniforms.uCubeBoxMin.value.set(bounds.minX, bounds.minY, bounds.minZ);
-    this.sharedUniforms.uCubeBoxMax.value.set(bounds.maxX, bounds.maxY, bounds.maxZ);
-    this.sharedUniforms.uCubeBoxHalf.value.set(
-      (bounds.maxX - bounds.minX) * 0.5,
-      (bounds.maxY - bounds.minY) * 0.5,
-      (bounds.maxZ - bounds.minZ) * 0.5,
-    );
     this.sharedUniforms.uVehicleInvMatrix.value.copy(bodyWorldMatrix).invert();
     this.sharedUniforms.uSunDir.value.copy(sunDir);
     this.sharedUniforms.uSunColor.value.copy(sunColor);
@@ -509,46 +532,47 @@ export class VehicleReflectionSystem {
     const reflLod = computeReflectionLodProfileInto(_reflLodInputScratch, _reflLodScratch);
     this.sharedUniforms.uReflLodBias.value = reflLod.cubeMipBias;
 
-    // Dirty-checked adaptive CubeCamera far plane (matches biome fog horizon so reflections never waste far draws)
-    if (this.cubeCamera && Math.abs(this.currentCubeFar - reflLod.cubeFar) > 1.0) {
-      this.currentCubeFar = reflLod.cubeFar;
-      const cams = this.cubeCamera.children as THREE.PerspectiveCamera[];
-      for (let i = 0; i < cams.length; i++) {
-        cams[i].far = reflLod.cubeFar;
-        cams[i].updateProjectionMatrix();
-      }
-    }
-
-    // On low/SoftwareGL, only capture the live cubemap when explicitly primed/dirty (0 faces/frame steady state!)
-    // Gate cooldown by BOTH frame count AND wall-clock ms scaled by camera-distance LOD!
     const nowMs = performance.now();
-    const elapsedSinceCubeMs = nowMs - this.lastCubeCycleMs;
-    const minCooldownFrames = Math.round(budget.cubeMinCooldownFrames * reflLod.cubeCooldownMult);
-    const fastCooldownFrames = Math.round(budget.cubeFastCooldownFrames * reflLod.cubeCooldownMult);
-    const minCooldownMs = minCooldownFrames * 16.667;
-    const fastCooldownMs = fastCooldownFrames * 16.667;
-    _probeWorldPos.set(vehiclePos.x, bounds.probeCenterY, vehiclePos.z);
-    const movedDistSq = _probeWorldPos.distanceToSquared(_prevProbePos);
-    const wantsDynamicCubeUpdate =
-      this.quality !== 'low' &&
-      (this.cubeFaceCursor !== 0 ||
-        (movedDistSq > budget.cubeMinMovedDistSq &&
-          this.framesSinceCubeCycle >= minCooldownFrames &&
-          elapsedSinceCubeMs >= minCooldownMs) ||
-        (vehicleSpeedMs > 6.0 &&
-          movedDistSq > budget.cubeFastMovedDistSq &&
-          this.framesSinceCubeCycle >= fastCooldownFrames &&
-          elapsedSinceCubeMs >= fastCooldownMs));
+    const probeY = groundPlaneY + 1.18;
+    this.cubeScheduler.seedInitialBoundsIfUnpublished(
+      vehiclePos.x,
+      probeY,
+      vehiclePos.z,
+      groundPlaneY,
+      biome,
+    );
 
-    const shouldUpdateCube =
-      this.cubeCamera !== null &&
-      this.cubeRT !== null &&
-      (forceFullPrime || this.cubeNeedsPrime || this.pmremPending || wantsDynamicCubeUpdate);
+    const hasDoubleBuffer = this.quality !== 'low' && this.cubeRTs[1] !== null && this.cubeCameras[1] !== null;
+    const writeIdx: 0 | 1 = hasDoubleBuffer ? (this.cubeReadIdx === 0 ? 1 : 0) : 0;
+    const writeRT = this.cubeRTs[writeIdx];
+    const writeCam = this.cubeCameras[writeIdx];
+
+    const schedIn = _cubeSchedInputScratch;
+    schedIn.nowMs = nowMs;
+    schedIn.probeX = vehiclePos.x;
+    schedIn.probeY = probeY;
+    schedIn.probeZ = vehiclePos.z;
+    schedIn.groundPlaneY = groundPlaneY;
+    schedIn.biome = biome;
+    schedIn.isLowTier = this.quality === 'low';
+    schedIn.vehicleSpeedMs = vehicleSpeedMs;
+    schedIn.facesPerFrame = budget.cubeFacesPerFrame;
+    schedIn.minMovedDistSq = budget.cubeMinMovedDistSq;
+    schedIn.fastMovedDistSq = budget.cubeFastMovedDistSq;
+    schedIn.minCooldownFrames = budget.cubeMinCooldownFrames;
+    schedIn.fastCooldownFrames = budget.cubeFastCooldownFrames;
+    schedIn.cooldownMult = reflLod.cubeCooldownMult;
+    schedIn.minCycleIntervalMs = this.quality === 'ultra' ? 32.0 : 48.0;
+    schedIn.pmremMinIntervalMs = 180.0;
+    schedIn.hasPmrem = this.pmremRT !== null;
+    schedIn.forceFullPrime = Boolean(forceFullPrime);
+
+    const cubeDecision = this.cubeScheduler.evaluateInto(schedIn, _cubeSchedDecisionScratch);
+    const shouldUpdateCube = writeRT !== null && writeCam !== null && cubeDecision.action !== 'idle';
     const runMirrors = this.quality !== 'low' || isCockpit;
 
-    if (this.quality !== 'low') {
-      this.framesSinceCubeCycle++;
-    }
+    // Sync PCC center & biome bounding box strictly from the PUBLISHED probe origin (matches readCubeRT 1:1!)
+    this.syncPublishedProbeUniforms();
 
     this.mirrorsRenderedThisFrame = 0;
     if (!shouldUpdateCube && !runMirrors) {
@@ -622,86 +646,76 @@ export class VehicleReflectionSystem {
 
     renderer.shadowMap.autoUpdate = false;
 
-    // === 1. LIVE HARDWARE-MIPMAPPED LINEAR HDR CUBEMAP PROBE ===
-    if (shouldUpdateCube && this.cubeCamera && this.cubeRT) {
-      // cubeRT is ALWAYS HalfFloatType across all tiers -> capture strictly in linear HDR
-      setLinearHdrOutput(true);
-      this.sharedUniforms.uCubeCenter.value.copy(_probeWorldPos);
-
-      let shouldBakePmremNow = false;
-
-      if (forceFullPrime || this.cubeNeedsPrime) {
-        this.cubeCamera.position.copy(_probeWorldPos);
-        this.cubeCamera.updateMatrixWorld(true);
-        const prevVehVis = vehicleRoot.visible;
-        vehicleRoot.visible = false;
-        this.cubeCamera.update(renderer, scene);
-        vehicleRoot.visible = prevVehVis;
-
-        this.cubeNeedsPrime = false;
-        this.pmremPending = false;
-        this.cubeFaceCursor = 0;
-        this.framesSinceCubeCycle = 0;
-        this.lastCubeCycleMs = nowMs;
-        _prevProbePos.copy(_probeWorldPos);
-        this.sharedUniforms.uHasRawCube.value = 1.0;
-        shouldBakePmremNow = true;
-      } else if (this.pmremPending) {
-        // Time-sliced 7th step: run PMREM convolution on its own frame (0 cube face draws)
-        // so no single frame ever pays both a face render + PMREM pass -> smoother 1% Low FPS!
-        this.pmremPending = false;
-        shouldBakePmremNow = true;
-      } else {
-        this.cubeCamera.position.copy(_probeWorldPos);
-        this.cubeCamera.updateMatrixWorld(true);
-        const prevVehVis = vehicleRoot.visible;
-        vehicleRoot.visible = false;
-
-        if (this.cubeCamera.coordinateSystem !== renderer.coordinateSystem) {
-          this.cubeCamera.coordinateSystem = renderer.coordinateSystem;
-          this.cubeCamera.updateCoordinateSystem();
-        }
-        const facesPerFrame = this.quality === 'ultra' ? 2 : 1;
-        const cameras = this.cubeCamera.children as THREE.PerspectiveCamera[];
-        let completedCycle = false;
-
-        this.cubeRT.texture.mipmapsAutoUpdate = false;
-        for (let f = 0; f < facesPerFrame; f++) {
-          const faceIdx = this.cubeFaceCursor;
-          const isLastInCycle = faceIdx === 5;
-          if (isLastInCycle) {
-            this.cubeRT.texture.mipmapsAutoUpdate = true;
-            completedCycle = true;
-          }
-          renderer.setRenderTarget(this.cubeRT, faceIdx, 0);
-          renderer.render(scene, cameras[faceIdx]);
-          this.cubeFaceCursor = (this.cubeFaceCursor + 1) % 6;
-        }
-        this.cubeRT.texture.mipmapsAutoUpdate = true;
-        vehicleRoot.visible = prevVehVis;
-
-        if (completedCycle) {
-          _prevProbePos.copy(_probeWorldPos);
-          this.framesSinceCubeCycle = 0;
-          this.lastCubeCycleMs = nowMs;
-          this.sharedUniforms.uHasRawCube.value = 1.0;
-          // Defer PMREM convolution to the next frame unless no PMREM exists yet
-          if (!this.pmremRT) {
-            shouldBakePmremNow = true;
-          } else {
-            this.pmremPending = true;
-          }
+    // === 1. DOUBLE-BUFFERED HARDWARE-MIPMAPPED LINEAR HDR CUBEMAP PROBE ===
+    if (shouldUpdateCube && writeRT && writeCam) {
+      // Dirty-checked adaptive CubeCamera far plane on writeCam
+      if (Math.abs(this.currentCubeFar[writeIdx] - reflLod.cubeFar) > 1.0) {
+        this.currentCubeFar[writeIdx] = reflLod.cubeFar;
+        const cams = writeCam.children as THREE.PerspectiveCamera[];
+        for (let i = 0; i < cams.length; i++) {
+          cams[i].far = reflLod.cubeFar;
+          cams[i].updateProjectionMatrix();
         }
       }
 
-      if (shouldBakePmremNow || !this.pmremRT) {
+      if (cubeDecision.action === 'prime' || cubeDecision.action === 'slice') {
+        setLinearHdrOutput(true);
+        _probeWorldPos.set(
+          cubeDecision.captureX,
+          cubeDecision.captureY,
+          cubeDecision.captureZ,
+        );
+        writeCam.position.copy(_probeWorldPos);
+        writeCam.updateMatrixWorld(true);
+        if (writeCam.coordinateSystem !== renderer.coordinateSystem) {
+          writeCam.coordinateSystem = renderer.coordinateSystem;
+          writeCam.updateCoordinateSystem();
+        }
+
+        const prevVehVis = vehicleRoot.visible;
+        vehicleRoot.visible = false;
+
+        if (cubeDecision.action === 'prime') {
+          writeRT.texture.mipmapsAutoUpdate = true;
+          writeCam.update(renderer, scene);
+        } else {
+          const cameras = writeCam.children as THREE.PerspectiveCamera[];
+          writeRT.texture.mipmapsAutoUpdate = false;
+          for (let f = 0; f < cubeDecision.faceCount; f++) {
+            const faceIdx = cubeDecision.faceStart + f;
+            if (faceIdx === 5) {
+              // Generate complete hardware mipmaps across all 6 faces cleanly once the final face finishes!
+              writeRT.texture.mipmapsAutoUpdate = true;
+            }
+            renderer.setRenderTarget(writeRT, faceIdx, 0);
+            renderer.render(scene, cameras[faceIdx]);
+          }
+          writeRT.texture.mipmapsAutoUpdate = true;
+        }
+
+        vehicleRoot.visible = prevVehVis;
+      }
+
+      const publishedNow = this.cubeScheduler.commit(schedIn, cubeDecision);
+      if (publishedNow) {
+        if (hasDoubleBuffer) {
+          this.cubeReadIdx = writeIdx;
+        }
+        const readRT = this.cubeRTs[this.cubeReadIdx]!;
+        this.sharedUniforms.uEnvCubeRaw.value = readRT.texture;
+        this.sharedUniforms.uHasRawCube.value = 1.0;
+        this.syncPublishedProbeUniforms();
+      }
+
+      const readRT = this.cubeRTs[this.cubeReadIdx];
+      if (readRT && (cubeDecision.shouldBakePmrem || !this.pmremRT)) {
         if (!this.pmremGenerator) {
           this.pmremGenerator = new THREE.PMREMGenerator(renderer);
           this.pmremGenerator.compileCubemapShader();
         }
         const prevToneMapping = renderer.toneMapping;
         renderer.toneMapping = THREE.NoToneMapping;
-        this.pmremRT = this.pmremGenerator.fromCubemap(this.cubeRT.texture, this.pmremRT);
+        this.pmremRT = this.pmremGenerator.fromCubemap(readRT.texture, this.pmremRT);
         renderer.toneMapping = prevToneMapping;
       }
     }
@@ -935,10 +949,33 @@ export class VehicleReflectionSystem {
     renderer.render(scene, mirrorCam);
   }
 
+  private syncPublishedProbeUniforms(): void {
+    const s = this.cubeScheduler;
+    const bounds = computeBiomeReflectionBoundsInto(
+      s.publishedBiome,
+      s.publishedX,
+      s.publishedGroundY,
+      s.publishedZ,
+      _boundsScratch,
+    );
+    this.sharedUniforms.uCubeCenter.value.set(s.publishedX, s.publishedY, s.publishedZ);
+    this.sharedUniforms.uCubeBoxMin.value.set(bounds.minX, bounds.minY, bounds.minZ);
+    this.sharedUniforms.uCubeBoxMax.value.set(bounds.maxX, bounds.maxY, bounds.maxZ);
+    this.sharedUniforms.uCubeBoxHalf.value.set(
+      (bounds.maxX - bounds.minX) * 0.5,
+      (bounds.maxY - bounds.minY) * 0.5,
+      (bounds.maxZ - bounds.minZ) * 0.5,
+    );
+  }
+
   public dispose(): void {
-    if (this.cubeRT) {
-      this.cubeRT.dispose();
-      this.cubeRT = null;
+    for (let i = 0; i < 2; i++) {
+      const rt = this.cubeRTs[i];
+      if (rt) {
+        rt.dispose();
+        this.cubeRTs[i] = null;
+      }
+      this.cubeCameras[i] = null;
     }
     if (this.pmremRT) {
       this.pmremRT.dispose();

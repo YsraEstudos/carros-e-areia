@@ -107,9 +107,9 @@ vec3 rivProjectParallaxRay(
 // distant sky/clouds and far-camera reflections soften naturally via distance-adaptive uReflLodBias.
 float rivConeTracedMip( float roughness, float hitDist, float isGroundHit ) {
   float r = clamp( roughness, 0.0, 1.0 );
-  float distT = smoothstep( 1.0, 16.0, hitDist );
-  float distScale = mix( mix( 0.44, 0.34, isGroundHit ), 0.92, distT );
-  float perceptualR = r * ( 1.85 - 0.85 * r );
+  float distT = smoothstep( 1.0, 18.0, hitDist );
+  float distScale = mix( mix( 0.40, 0.30, isGroundHit ), 0.76, distT );
+  float perceptualR = r * ( 1.80 - 0.80 * r );
   return clamp( perceptualR * uRawCubeMaxMip * distScale + uReflLodBias, 0.0, uRawCubeMaxMip );
 }
 

@@ -151,20 +151,21 @@ export function computeReflectionLodProfileInto(
     return out;
   }
 
-  // Smoothly ramp cubemap mip bias from 0.0 (<= 9m) up to 1.65 (at >= 42m)
-  const mipT = Math.max(0, Math.min(1, (dist - 9.0) / 33.0));
+  // Keep cubemap crisp (0.0 extra mip bias) across all normal chase & orbit views (<= 14.5m),
+  // gently increasing mip bias only when zoomed far out (>= 14.5m..45m)
+  const mipT = Math.max(0, Math.min(1, (dist - 14.5) / 30.5));
   const smoothMipT = mipT * mipT * (3.0 - 2.0 * mipT);
-  out.cubeMipBias = smoothMipT * (input.isMobile ? 1.8 : 1.5);
+  out.cubeMipBias = smoothMipT * (input.isMobile ? 1.35 : 1.15);
 
-  // Slow down CubeCamera refresh cadence when the vehicle is far away and small on screen
-  if (dist <= 11.0) {
+  // Keep full 1.0x probe refresh responsiveness out to 15.5m; throttle only at long drone zoom-outs
+  if (dist <= 15.5) {
     out.cubeCooldownMult = 1.0;
-  } else if (dist <= 22.0) {
-    out.cubeCooldownMult = 1.8;
+  } else if (dist <= 26.0) {
+    out.cubeCooldownMult = 1.6;
   } else if (dist <= 38.0) {
     out.cubeCooldownMult = 3.0;
   } else {
-    out.cubeCooldownMult = 4.5;
+    out.cubeCooldownMult = 4.2;
   }
 
   // Dynamic wing-mirror viewport resolution & Hz scaling for exterior cameras

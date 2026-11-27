@@ -7,6 +7,9 @@ import {
   getGraphicsQualityBudget,
 } from './GraphicsQualityBudget';
 import {
+  ReflectionCubeScheduleDecision,
+  ReflectionCubeScheduleInput,
+  ReflectionCubeScheduler,
   computeBiomeReflectionBounds,
   computeConeTracedMipLevel,
   computeDielectricFresnel,
@@ -1652,7 +1655,9 @@ test('GraphicsQualityBudget & DPR: Hybrid mode applies aggressive lossless budge
   assert.ok(hybridDesktop.mirrorMaxExteriorDist > 5.0 && hybridDesktop.mirrorMaxExteriorDist < 7.0);
   assert.equal(hybridDesktop.interleaveCockpitMirrors, true);
   assert.equal(ultraDesktop.interleaveCockpitMirrors, false);
-  assert.ok(hybridDesktop.cubeMinCooldownFrames >= 30);
+  assert.ok(ultraDesktop.cubeFacesPerFrame >= 3 && hybridDesktop.cubeFacesPerFrame >= 2);
+  assert.ok(ultraDesktop.cubeMinMovedDistSq < hybridDesktop.cubeMinMovedDistSq);
+  assert.ok(hybridDesktop.cubeMinCooldownFrames <= 4);
   assert.ok(hybridDesktop.grassDensityRatio < 1.0 && hybridDesktop.rainStreakRatio < 1.0);
 
   // Hybrid mobile trims further
@@ -1780,6 +1785,109 @@ test('ReflectionRayMath: contact-hardening cone mip, Lagarde specular occlusion,
   assert.ok(Math.abs(computeDielectricFresnel(0.0, 1.5) - 1.0) < 1e-4);
   assert.ok(computeDielectricFresnel(0.15, 1.52) > 0.45);
 });
+
+test('ReflectionCubeScheduler: double-buffered cycle locks capture origin & keeps published bounds coherent until face 5 swap', () => {
+  const sched = new ReflectionCubeScheduler();
+  const decision: ReflectionCubeScheduleDecision = {
+    action: 'idle',
+    faceStart: 0,
+    faceCount: 0,
+    captureX: 0,
+    captureY: 0,
+    captureZ: 0,
+    completesCycle: false,
+    shouldBakePmrem: false,
+  };
+  const input: ReflectionCubeScheduleInput = {
+    nowMs: 100,
+    probeX: 0,
+    probeY: 1.18,
+    probeZ: 0,
+    groundPlaneY: 0,
+    biome: 'rainy_highway',
+    isLowTier: false,
+    vehicleSpeedMs: 0,
+    facesPerFrame: 2,
+    minMovedDistSq: 0.64,
+    fastMovedDistSq: 0.36,
+    minCooldownFrames: 2,
+    fastCooldownFrames: 2,
+    cooldownMult: 1,
+    minCycleIntervalMs: 48,
+    pmremMinIntervalMs: 180,
+    hasPmrem: false,
+    forceFullPrime: false,
+  };
+
+  // Frame 0: initial prime renders all 6 faces and immediately publishes origin + PMREM
+  sched.evaluateInto(input, decision);
+  assert.equal(decision.action, 'prime');
+  assert.equal(decision.faceCount, 6);
+  assert.equal(decision.shouldBakePmrem, true);
+  assert.equal(sched.commit(input, decision), true);
+  assert.equal(sched.publishedZ, 0);
+
+  // Move car 2m forward after cooldown -> starts slice 0..1 latched at z=2.0
+  input.hasPmrem = true;
+  input.nowMs = 160;
+  input.probeZ = 2.0;
+  input.vehicleSpeedMs = 12;
+  // Advance 2 frames for minCooldownFrames=2
+  sched.evaluateInto({ ...input, probeZ: 0.2, nowMs: 120 }, decision);
+  sched.evaluateInto(input, decision);
+  assert.equal(decision.action, 'slice');
+  assert.equal(decision.faceStart, 0);
+  assert.equal(decision.faceCount, 2);
+  assert.equal(decision.captureZ, 2.0);
+  assert.equal(decision.completesCycle, false);
+  assert.equal(sched.commit(input, decision), false);
+  // Published origin MUST remain at z=0 while write buffer is still mid-cycle!
+  assert.equal(sched.publishedZ, 0);
+
+  // Car keeps moving to z=3.2 and z=4.5 during faces 2..5: capture MUST stay locked at latched z=2.0!
+  input.nowMs = 176;
+  input.probeZ = 3.2;
+  sched.evaluateInto(input, decision);
+  assert.equal(decision.action, 'slice');
+  assert.equal(decision.faceStart, 2);
+  assert.equal(decision.captureZ, 2.0);
+  assert.equal(decision.completesCycle, false);
+  assert.equal(sched.commit(input, decision), false);
+  assert.equal(sched.publishedZ, 0);
+
+  // Final faces 4..5 complete cycle -> atomic buffer swap publishes z=2.0!
+  input.nowMs = 192;
+  input.probeZ = 4.5;
+  sched.evaluateInto(input, decision);
+  assert.equal(decision.action, 'slice');
+  assert.equal(decision.faceStart, 4);
+  assert.equal(decision.captureZ, 2.0);
+  assert.equal(decision.completesCycle, true);
+  assert.equal(sched.commit(input, decision), true);
+  assert.equal(sched.publishedZ, 2.0);
+
+  // Soon after (elapsed < pmremMinIntervalMs), raw cube updates smoothly WITHOUT re-running heavy PMREM
+  input.nowMs = 245;
+  input.probeZ = 6.0;
+  sched.evaluateInto({ ...input, nowMs: 210, probeZ: 5.0 }, decision);
+  sched.evaluateInto(input, decision);
+  assert.equal(decision.action, 'slice');
+  assert.equal(decision.faceStart, 0);
+  assert.equal(sched.commit(input, decision), false);
+
+  // Once pmremMinIntervalMs (180ms from 100 -> 280+) elapses after a cycle completes, deferred PMREM fires
+  sched.evaluateInto({ ...input, nowMs: 262, probeZ: 6.4 }, decision);
+  sched.commit(input, decision);
+  sched.evaluateInto({ ...input, nowMs: 278, probeZ: 6.8 }, decision);
+  sched.commit(input, decision);
+  assert.equal(sched.publishedZ, 6.0);
+
+  sched.evaluateInto({ ...input, nowMs: 295, probeZ: 7.4 }, decision);
+  assert.equal(decision.action, 'pmrem');
+  assert.equal(decision.shouldBakePmrem, true);
+  assert.equal(decision.faceCount, 0);
+});
+
 
 
 

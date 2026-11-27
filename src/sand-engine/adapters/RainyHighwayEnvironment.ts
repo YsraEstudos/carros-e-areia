@@ -779,8 +779,6 @@ export class RainyHighwayEnvironment {
   public setReflectionExcludedLayer(layer: number): void {
     this.rainLines.layers.set(layer);
     setInstancedMeshLayer(this.grassMesh, layer);
-    // Exclude fine inner tree branches from CubeCamera & wing mirror reflections while keeping trunks & canopies!
-    setInstancedMeshLayer(this.branchMesh, layer);
   }
 
   public setLodDistances(lod: SceneObjectLodDistances): void {

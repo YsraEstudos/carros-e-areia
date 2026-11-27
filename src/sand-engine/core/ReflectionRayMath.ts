@@ -258,3 +258,272 @@ export function computeDielectricFresnel(nDotV: number, ior = 1.5): number {
   const p5 = oneMinus * oneMinus * oneMinus * oneMinus * oneMinus;
   return f0 + (1.0 - f0) * p5;
 }
+
+export interface ReflectionCubeScheduleInput {
+  nowMs: number;
+  probeX: number;
+  probeY: number;
+  probeZ: number;
+  groundPlaneY: number;
+  biome: EnvironmentBiome;
+  isLowTier: boolean;
+  vehicleSpeedMs: number;
+  facesPerFrame: number;
+  minMovedDistSq: number;
+  fastMovedDistSq: number;
+  minCooldownFrames: number;
+  fastCooldownFrames: number;
+  cooldownMult: number;
+  minCycleIntervalMs: number;
+  pmremMinIntervalMs: number;
+  hasPmrem: boolean;
+  forceFullPrime: boolean;
+}
+
+export interface ReflectionCubeScheduleDecision {
+  action: 'idle' | 'prime' | 'slice' | 'pmrem';
+  faceStart: number;
+  faceCount: number;
+  captureX: number;
+  captureY: number;
+  captureZ: number;
+  completesCycle: boolean;
+  shouldBakePmrem: boolean;
+}
+
+/**
+ * Pure, zero-allocation state machine coordinating ping-pong double-buffered cubemap captures.
+ * Guarantees:
+ *  - All 6 faces of a time-sliced cycle render from one latched origin (`cycleX/Y/Z`), never drifting mid-cycle.
+ *  - The consumer-visible `published` origin & biome bounds stay locked to the active `read` cubemap until face 5 completes.
+ *  - Cooldown gating only limits starting a NEW cycle; once a cycle begins (`faceCursor > 0`), remaining faces finish consecutively.
+ *  - Heavy PMREM CubeUV convolution runs on a separate deferred frame and throttled interval so sharp `uEnvCubeRaw` updates stay silky smooth.
+ */
+export class ReflectionCubeScheduler {
+  public publishedX = 0;
+  public publishedY = 1.18;
+  public publishedZ = 0;
+  public publishedGroundY = 0;
+  public publishedBiome: EnvironmentBiome = 'desert';
+  public hasPublished = false;
+
+  public cycleX = 0;
+  public cycleY = 1.18;
+  public cycleZ = 0;
+  public cycleGroundY = 0;
+  public cycleBiome: EnvironmentBiome = 'desert';
+
+  public faceCursor = 0;
+  public needsPrime = true;
+  public pmremPending = false;
+  private framesSinceCycle = 999;
+  private lastCycleCompleteMs = -1e6;
+  private lastPmremMs = -1e6;
+
+  public reset(): void {
+    this.faceCursor = 0;
+    this.needsPrime = true;
+    this.pmremPending = false;
+    this.hasPublished = false;
+    this.framesSinceCycle = 999;
+    this.lastCycleCompleteMs = -1e6;
+    this.lastPmremMs = -1e6;
+  }
+
+  public markDirty(): void {
+    this.needsPrime = true;
+  }
+
+  public seedInitialBoundsIfUnpublished(
+    probeX: number,
+    probeY: number,
+    probeZ: number,
+    groundPlaneY: number,
+    biome: EnvironmentBiome,
+  ): void {
+    if (this.hasPublished) return;
+    this.publishedX = probeX;
+    this.publishedY = probeY;
+    this.publishedZ = probeZ;
+    this.publishedGroundY = groundPlaneY;
+    this.publishedBiome = biome;
+  }
+
+  public evaluateInto(
+    input: ReflectionCubeScheduleInput,
+    out: ReflectionCubeScheduleDecision,
+  ): ReflectionCubeScheduleDecision {
+    if (!input.isLowTier) {
+      this.framesSinceCycle++;
+    }
+
+    if (input.forceFullPrime || this.needsPrime) {
+      out.action = 'prime';
+      out.faceStart = 0;
+      out.faceCount = 6;
+      out.captureX = input.probeX;
+      out.captureY = input.probeY;
+      out.captureZ = input.probeZ;
+      out.completesCycle = true;
+      out.shouldBakePmrem = true;
+      return out;
+    }
+
+    if (input.isLowTier) {
+      out.action = 'idle';
+      out.faceStart = 0;
+      out.faceCount = 0;
+      out.captureX = this.publishedX;
+      out.captureY = this.publishedY;
+      out.captureZ = this.publishedZ;
+      out.completesCycle = false;
+      out.shouldBakePmrem = !input.hasPmrem && this.hasPublished;
+      return out;
+    }
+
+    // Resume an in-progress 6-face cycle immediately with zero cooldown wait, using latched cyclePos
+    if (this.faceCursor > 0) {
+      const remaining = 6 - this.faceCursor;
+      const count = Math.max(1, Math.min(remaining, input.facesPerFrame));
+      const completes = this.faceCursor + count >= 6;
+      out.action = 'slice';
+      out.faceStart = this.faceCursor;
+      out.faceCount = count;
+      out.captureX = this.cycleX;
+      out.captureY = this.cycleY;
+      out.captureZ = this.cycleZ;
+      out.completesCycle = completes;
+      out.shouldBakePmrem = !input.hasPmrem && completes;
+      return out;
+    }
+
+    // If PMREM is due (>= pmremMinIntervalMs), run its time-sliced pass on the freshly published read buffer
+    // before kicking off a brand new 6-face cycle so diffuse/rough IBL stays fresh even at lower FPS.
+    if (
+      this.pmremPending &&
+      this.hasPublished &&
+      (!input.hasPmrem || input.nowMs - this.lastPmremMs >= input.pmremMinIntervalMs)
+    ) {
+      out.action = 'pmrem';
+      out.faceStart = 0;
+      out.faceCount = 0;
+      out.captureX = this.publishedX;
+      out.captureY = this.publishedY;
+      out.captureZ = this.publishedZ;
+      out.completesCycle = false;
+      out.shouldBakePmrem = true;
+      return out;
+    }
+
+    // Check if a new 6-face cycle should start
+    const dx = input.probeX - this.publishedX;
+    const dy = input.probeY - this.publishedY;
+    const dz = input.probeZ - this.publishedZ;
+    const movedSq = dx * dx + dy * dy + dz * dz;
+
+    const minFrames = Math.max(1, Math.round(input.minCooldownFrames * input.cooldownMult));
+    const fastFrames = Math.max(1, Math.round(input.fastCooldownFrames * input.cooldownMult));
+    const elapsedMs = input.nowMs - this.lastCycleCompleteMs;
+    const minIntervalMs = Math.max(
+      input.minCycleIntervalMs * input.cooldownMult,
+      minFrames * 14.0,
+    );
+    const fastIntervalMs = Math.max(
+      input.minCycleIntervalMs * 0.85 * input.cooldownMult,
+      fastFrames * 14.0,
+    );
+
+    const biomeChanged = this.hasPublished && this.publishedBiome !== input.biome;
+    const wantsNewCycle =
+      !this.hasPublished ||
+      biomeChanged ||
+      (movedSq > input.minMovedDistSq &&
+        this.framesSinceCycle >= minFrames &&
+        elapsedMs >= minIntervalMs) ||
+      (input.vehicleSpeedMs > 4.5 &&
+        movedSq > input.fastMovedDistSq &&
+        this.framesSinceCycle >= fastFrames &&
+        elapsedMs >= fastIntervalMs);
+
+    if (wantsNewCycle) {
+      this.cycleX = input.probeX;
+      this.cycleY = input.probeY;
+      this.cycleZ = input.probeZ;
+      this.cycleGroundY = input.groundPlaneY;
+      this.cycleBiome = input.biome;
+
+      const count = Math.max(1, Math.min(6, input.facesPerFrame));
+      const completes = count >= 6;
+      out.action = 'slice';
+      out.faceStart = 0;
+      out.faceCount = count;
+      out.captureX = this.cycleX;
+      out.captureY = this.cycleY;
+      out.captureZ = this.cycleZ;
+      out.completesCycle = completes;
+      out.shouldBakePmrem = !input.hasPmrem && completes;
+      return out;
+    }
+
+    out.action = 'idle';
+    out.faceStart = 0;
+    out.faceCount = 0;
+    out.captureX = this.publishedX;
+    out.captureY = this.publishedY;
+    out.captureZ = this.publishedZ;
+    out.completesCycle = false;
+    out.shouldBakePmrem = false;
+    return out;
+  }
+
+  public commit(
+    input: ReflectionCubeScheduleInput,
+    decision: ReflectionCubeScheduleDecision,
+  ): boolean {
+    if (decision.action === 'prime') {
+      this.publishedX = input.probeX;
+      this.publishedY = input.probeY;
+      this.publishedZ = input.probeZ;
+      this.publishedGroundY = input.groundPlaneY;
+      this.publishedBiome = input.biome;
+      this.hasPublished = true;
+      this.needsPrime = false;
+      this.pmremPending = false;
+      this.faceCursor = 0;
+      this.framesSinceCycle = 0;
+      this.lastCycleCompleteMs = input.nowMs;
+      this.lastPmremMs = input.nowMs;
+      return true;
+    }
+
+    if (decision.action === 'slice') {
+      this.faceCursor = (decision.faceStart + decision.faceCount) % 6;
+      if (decision.completesCycle) {
+        this.publishedX = this.cycleX;
+        this.publishedY = this.cycleY;
+        this.publishedZ = this.cycleZ;
+        this.publishedGroundY = this.cycleGroundY;
+        this.publishedBiome = this.cycleBiome;
+        this.hasPublished = true;
+        this.framesSinceCycle = 0;
+        this.lastCycleCompleteMs = input.nowMs;
+        if (decision.shouldBakePmrem) {
+          this.pmremPending = false;
+          this.lastPmremMs = input.nowMs;
+        } else {
+          this.pmremPending = true;
+        }
+        return true;
+      }
+      return false;
+    }
+
+    if (decision.action === 'pmrem') {
+      this.pmremPending = false;
+      this.lastPmremMs = input.nowMs;
+      return false;
+    }
+
+    return false;
+  }
+}
