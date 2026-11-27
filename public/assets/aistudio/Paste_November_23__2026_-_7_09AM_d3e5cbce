@@ -1,0 +1,595 @@
+Pensou por 3m
+
+### DuneFlow Next Generation — Recomendações avançadas para simulação de areia e partículas
+
+Arquitetura técnica PC-First | Three.js r187 · WebGL2 · WebGPU · WASM · TypeScript
+
+O relatório anterior estabeleceu uma base importante: adotar JoltPhysics.js para colisões e corpos rígidos, preservar a terramecânica Bekker/SCM e pesquisar MLS-MPM como evolução da areia tridimensional.
+
+Minha proposta é ir além dessa arquitetura e tratar o DuneFlow como um simulador híbrido de materiais granulares, no qual o terreno deixa de ser apenas uma superfície que afunda quando uma roda passa.
+
+O objetivo é reproduzir comportamentos como:
+
+* Um pneu escava um buraco, empurra areia para os lados e cria uma crista que pode desmoronar.
+
+* Uma pedra fica parcialmente enterrada, é descoberta pela erosão e pode rolar quando perde sustentação.
+
+* A areia escorre por baixo do chassi, se acumula contra obstáculos e oferece resistência variável.
+
+* Grãos e pequenos aglomerados são arremessados pelos pneus, colidem com objetos e voltam ao terreno.
+
+* Areia seca, úmida, compactada e saturada apresentam resistências, ângulos de repouso e comportamentos diferentes.
+
+* Dunas mudam lentamente com o vento, preservando o volume de sedimento e a memória das passagens do veículo.
+
+É fundamental distinguir realismo visual, comportamento granular fisicamente plausível e simulação individual de grãos. Os três objetivos exigem técnicas e custos computacionais muito diferentes.
+
+### 1\. As decisões que eu mudaria no relatório original
+
+Manter
+
+JoltPhysics.js como núcleo rígido, Bekker/SCM para forças de contato e `ToroidalCascade` para a deformação de grande escala.
+
+Corrigir
+
+Não escolher simplesmente entre contato com rocha ou areia. O pneu pode estar apoiado simultaneamente nos dois materiais. É necessário um resolvedor de contatos mistos que evite aplicação duplicada de forças.
+
+Corrigir
+
+Não tratar o `CPU Shadow Buffer` como perfeitamente sincronizado com a GPU por definição. Avalanches, relaxamento, deposição e erosão precisam obedecer a um contrato verificável de consistência.
+
+Corrigir
+
+65 mil partículas MLS-MPM não significam 65 mil grãos microscópicos reais. Cada material point pode representar um volume de areia contendo inúmeros grãos.
+
+Expandir
+
+A investigação não deve se limitar a MLS-MPM. Devemos comparar MPM, DEM, XPBD granular, modelos de fluxo superficial, autômatos celulares e representações híbridas.
+
+Expandir
+
+Conservação de massa, transferência entre partículas e terreno, interação tridimensional com obstáculos e estabilidade numérica devem se tornar requisitos centrais, e não melhorias opcionais.
+
+Há também uma correção importante de engenharia: não é possível garantir que 65 mil partículas MLS-MPM custem somente 2,5–4 ms em uma RX 6600 sem um benchmark do algoritmo completo. O custo depende da grade 3D, do modelo constitutivo, do número de substeps, da contenção nas operações atômicas e das colisões.
+
+O objetivo deve ser construir uma simulação mensurável, calibrável e progressivamente mais sofisticada, sem comprometer a física do PC para atender dispositivos móveis.
+
+### 2\. A arquitetura que recomendo para a próxima geração
+
+O maior avanço seria organizar o simulador em cinco níveis físicos que trabalham sobre o mesmo terreno, mas com resoluções, frequências e responsabilidades diferentes.
+
+Nível 1 — Mundo rígido e veículo
+
+JoltPhysics.js · WASM · 120 Hz · rodas, chassi, rochas e reboque
+
+Nível 2 — Solo mecanicamente autoritativo
+
+Bekker/SCM · contatos de banda · compactação · resistência · erosão
+
+Nível 3 — Terreno de grande escala
+
+ToroidalCascade · altura · redistribuição de massa · avalanches · vento
+
+Nível 4 — Volume granular localizado
+
+WebGPU · MLS-MPM / DEM experimental · areia 3D perto de pneus e obstáculos
+
+Nível 5 — Representação visual
+
+Grãos visíveis · poeira · glints · cristas · sombras · translucidez
+
+As setas representam acoplamentos de estado e forças. O nível granular WebGPU começa sem devolver forças ao veículo; o acoplamento mecânico bidirecional será uma etapa de pesquisa separada.
+
+### Escolha do método conforme o fenômeno
+
+| Método                           | Onde realmente se destaca                                                           | Papel no DuneFlow                                         |
+| -------------------------------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| Heightfield + fluxo conservativo | Trilhas, dunas, areia deslocada e avalanches superficiais                           | Núcleo do terreno                                         |
+| Bekker/SCM                       | Pressão, afundamento e tração dos pneus                                             | Núcleo físico                                             |
+| MLS-MPM 3D                       | Fluxo volumétrico, deformação contínua, colapso de montes e contato com superfícies | Principal candidato experimental                          |
+| DEM                              | Grãos ou aglomerados individuais, colisões, rotação, empilhamento e travamento      | Referência de alta fidelidade e experimentos pequenos     |
+| XPBD granular                    | Contatos/constraints aproximados e materiais deformáveis                            | Protótipos alternativos                                   |
+| Autômato celular                 | Redistribuição discreta barata em células                                           | Efeitos locais simplificados; não substitui terramecânica |
+| SPH / PBF                        | Água, fluidos e suspensão de sedimentos                                             | Complemento para lama e água                              |
+| LBM + MPM                        | Interação complexa entre ar, água e areia                                           | Pesquisa avançada, não base de produção                   |
+
+O motivo para pesquisar tanto MLS-MPM quanto DEM é que eles não representam exatamente o mesmo fenômeno. O MPM trabalha com um material contínuo discretizado em pontos; o DEM trabalha com corpos granulares discretos, permitindo representar explicitamente colisões e rotação dos grãos.
+
+O projeto [Chrono DEM-Engine](https://github.com/projectchrono/DEM-Engine?utm_source=chatgpt.com) é particularmente relevante porque demonstra contatos granulares com geometrias complexas e interação com rodas e malhas. Já [MLS-MPM de Yuanming Hu](https://yuanming.taichi.graphics/publication/2018-mlsmpm/?utm_source=chatgpt.com) é uma referência importante para materiais contínuos com contato com corpos rígidos. GitHub +1
+
+### 3\. Novos projetos open-source que merecem entrar na pesquisa
+
+A pesquisa adicional encontrou referências especialmente relevantes para o objetivo de areia deformável. Alguns são códigos científicos consolidados; outros são experimentos recentes e ainda precisam de validação independente.
+
+### A. Física de areia granular e MPM
+
+| Projeto                    | Licença / plataforma         | O que investigar                                                                                                                |
+| -------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| harri665/MPM               | MIT · C++/CUDA/OpenGL/WebGPU | Prioridade máxima: implementação 3D de areia com Drucker–Prager, kernels WGSL, atomics, SVD, testes de conservação e benchmarks |
+| Zarathos94/mls-mpm-gpu     | MIT · WebGPU/WGSL            | P2G/G2P 2D, atomics inteiros em ponto fixo, deformação e plasticidade de areia                                                  |
+| yuanming-hu/taichi_mpm     | MIT · C++/Taichi             | MLS-MPM, CPIC, acoplamento com sólidos, fundamentos matemáticos e código didático de 88 linhas                                  |
+| taichi-dev/taichi_elements | MIT · Python/Taichi          | Grades esparsas, materiais múltiplos, compactação de dados e otimização do MPM                                                  |
+| projectchrono/DEM-Engine   | BSD-3 · C++/CUDA             | Contatos entre partículas complexas, atrito, interação com rodas e corpos rígidos                                               |
+| VeloxSim/veloxsim-dem-open | MIT · Python/NVIDIA Warp     | Hertz–Mindlin, resistência ao rolamento, coesão JKR, memória de atrito tangencial                                               |
+| larsblatny/matter          | GPL-3.0 · C++                | Modelos elasto-viscoplásticos, reologia granular e calibração física; estudo conceitual sem copiar código GPL                   |
+| PositionBasedDynamics      | MIT · C++                    | Constraints, colisões baseadas em campos de distância, protótipos XPBD                                                          |
+
+Descoberta mais importante: `harri665/MPM` tem um valor especialmente alto para o DuneFlow porque reúne sand constitutive model, simulação 3D e implementação WebGPU no mesmo projeto. O autor publica também limitações e comparações de desempenho, incluindo o custo da ausência de `atomicAdd` de ponto flutuante em WGSL.
+
+Em um teste descrito pelo próprio repositório, 131.072 partículas no navegador com renderização produziram cerca de 34 fps no hardware usado pelo autor. Isso não é benchmark da RX 6600, mas demonstra por que os custos previstos no relatório anterior não devem ser presumidos. GitHub +1
+
+### B. Erosão, vento, dunas e conservação de sedimentos
+
+| Projeto                                 | Licença / plataforma                                  | O que investigar                                                                            |
+| --------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| weigert/SimpleWindErosion               | MIT · C++/OpenGL                                      | Erosão eólica, abrasão, transporte, deposição e cascatas de areia                           |
+| Clocktown/Oasis                         | MIT · CUDA/OpenGL                                     | Erosão hidráulica e eólica combinada, dunas e vegetação dinâmica                            |
+| LLNL/Rescal-snow                        | C/C++ · licença a conferir antes de incorporar código | Saltation, avalanches, transporte pelo vento e evolução de dunas                            |
+| SamG-Coder/SandDune                     | MIT · Three.js/WebGL2                                 | Escavação conservativa, deposição, vento, colapso e areia molhada no navegador              |
+| taesiri/soilwebgpu                      | MIT com componentes LGPL-3.0 · WebGPU/TS              | Erosão multiescala, transporte estocástico, validação CPU/GPU e exportação de heightmaps    |
+| Windblown Sand Around Obstacles — Inria | Paper de 2024 + código de pesquisa no GitLab          | Simulação do fluxo de vento sobre obstáculos, saltation, deposição e validação com medições |
+
+O estudo da Inria é uma das melhores descobertas para a areia ao redor das rochas. Em vez de simplesmente escurecer a parte inferior da rocha ou criar uma máscara estética, ele oferece uma base para modelar onde o vento remove areia, onde deposita material e como o relevo muda em torno de obstáculos. www-sop.inria.fr +1
+
+`Oasis` merece atenção semelhante por combinar erosão eólica, água e alteração do terreno, mas seu código CUDA não pode ser adotado diretamente como dependência WebGPU. Clocktown/Oasis · GitHub
+
+### C. Projetos WebGPU diretamente relacionados à arquitetura
+
+| Projeto                           | Plataforma / situação                    | Aplicação                                                                              |
+| --------------------------------- | ---------------------------------------- | -------------------------------------------------------------------------------------- |
+| APS4087/spill                     | Three.js + TSL · protótipo de fluido MPM | Estudar integração de cinco passes compute, buffers e renderização com Three           |
+| jta5456/fluid-cube                | WebGPU/WGSL · protótipo 3D               | Benchmark, testes GPU versus CPU, leitura de resultados e profiling                    |
+| jure/webphysics                   | MIT · WebGPU/AVBD experimental           | Colisão 3D e solver GPU para estudo futuro                                             |
+| sbobyn/three-avbd                 | MIT · Three.js/WebGPU/TS                 | Alternativa experimental para rigid bodies na GPU e comparação com Jolt                |
+| DeckardGer/Powder-Sim             | WebGPU · autômato celular                | Transporte de areia por células e operações compute discretas                          |
+| DacianShaw/LBM-MPM-Air-Water-Sand | MIT · Python/Taichi/CUDA                 | Acoplamento físico água–areia–ar, retenção de água, porosidade e conservação de volume |
+
+Nos projetos `spill` e `fluid-cube`, a licença não ficou suficientemente estabelecida nas páginas consultadas; eu os colocaria como referências de pesquisa, não código autorizado para reutilização, até verificar a licença.
+
+Outra descoberta relevante é o código de [LBM-MPM-Air-Water-Sand](https://github.com/DacianShaw/LBM-MPM-Air-Water-Sand?utm_source=chatgpt.com), ligado ao paper SIGGRAPH 2026. Ele implementa uma versão acadêmica 2D, envolvendo ar, água e areia, mas não oferece uma solução 3D pronta para o navegador. Ainda assim, é muito mais pertinente para o futuro da lama do que adaptar indiscriminadamente um solver visual de fluidos. DacianShaw/LBM-MPM-Air-Water-Sand · GitHub +1
+
+### Classificação prática dos projetos
+
+Candidatos para uso direto: JoltPhysics.js, three-mesh-bvh e, mediante testes, componentes específicos do three-fluid-fx e do sistema atmosférico Takram.
+
+Candidatos a protótipo ou port: harri665/MPM, Zarathos94/mls-mpm-gpu, APS4087/spill, projetos de erosão e Solvers WebGPU/TSL.
+
+Referências científicas de validação: Project Chrono, DEM-Engine, Taichi MPM, Matter, Rescal-snow e LBM-MPM.
+
+Essa separação evita acrescentar dependências pesadas ao DuneFlow apenas porque um repositório produz demonstrações visualmente impressionantes.
+
+### 4\. Catálogo de 80 recomendações técnicas
+
+Organizei as propostas em sete grupos. Algumas já aparecem no relatório, mas foram refinadas; outras são ampliações minhas, inspiradas nos projetos e trabalhos encontrados.
+
+Prioridades: P0 = fundação indispensável; P1 = alto impacto; P2 = evolução avançada; P3 = pesquisa experimental.
+
+### A. Arquitetura, persistência e conservação de massa — P0
+
+1\. Criar um `TerrainMaterialState` independente do shader. Cada região deve conhecer espessura de areia, densidade aparente, compactação, umidade, resistência ao cisalhamento e material subjacente.
+
+2\. Separar areia solta de substrato rígido. Quando o pneu remover toda a areia disponível, deve encontrar terra compactada ou rocha, não continuar escavando infinitamente.
+
+3\. Implementar conservação explícita de massa. Areia removida de um sulco precisa aparecer em outro local, ser transferida para partículas ou sair do domínio por uma fronteira definida.
+
+4\. Criar um `SedimentMassLedger`. Registrar massa no terreno, em transporte, em partículas e em reservatórios temporários, evitando criar ou destruir areia involuntariamente.
+
+5\. Distinguir compactação de remoção. Uma roda pode diminuir a altura da superfície somente porque aumentou sua densidade, sem expulsar material lateralmente.
+
+6\. Implementar transações de deformação. Um evento físico deve produzir uma operação única que possa atualizar a representação CPU, gerar comandos GPU e ser registrada para replay.
+
+7\. Resolver a sincronização entre CPU e GPU. O relaxamento de avalanche não pode alterar a superfície visual e deixar a colisão usando alturas antigas indefinidamente.
+
+8\. Usar coordenadas mundiais estáveis. O deslocamento dos domínios toroidais não pode alterar o significado físico de partículas, sulcos ou depósitos persistentes.
+
+9\. Preservar histórico mecânico local. Guardar o efeito de passagens anteriores: compactação, cisalhamento acumulado e, quando relevante, remoldagem do material.
+
+10\. Adicionar testes automáticos de conservação e sincronização. O projeto `SandDune` oferece uma referência útil para testes de remoção, deposição, avalanches e conservação de material. GitHub
+
+Uma formulação útil para cada célula é:
+
+M_i=\\rho_{b,i} A_i h_i
+
+Onde representa a massa de sedimento, a densidade aparente, a área e a espessura da camada.
+
+A atualização deve operar sobre volumes ou massas transferidas, respeitando:
+
+M_i^{t+1}=M_i^t+\\sum M_{\\text{entrada}}
+-\\sum M_{\\text{saída}}+M_{\\text{fonte}}
+
+Assim, uma redução de altura causada por compactação não é confundida com uma perda de massa.
+
+### B. Contato físico entre pneus, areia, rochas e chassi — P0/P1
+
+11\. Criar contatos multiponto reais na banda do pneu, amostrando regiões dianteiras, centrais, traseiras e laterais conforme a complexidade do terreno.
+
+12\. Permitir contato simultâneo com areia e rocha. Em vez de selecionar rigidamente um material vencedor, resolver patches ativos diferentes, respeitando a distribuição da carga normal total.
+
+13\. Representar a área de contato deformável. A pressão sobre a areia deve depender da geometria, carga e pressão interna do pneu.
+
+14\. Modelar a resposta longitudinal e lateral separadamente. Slip ratio, slip angle e resistência de cisalhamento não devem compartilhar uma única curva artificial.
+
+15\. Adicionar resistência ao rolamento dependente do afundamento, especialmente ao empurrar uma cunha de areia à frente do pneu.
+
+16\. Implementar `rut-wall trapping`. Um pneu dentro de sulcos profundos precisa enfrentar resistência lateral para sair deles.
+
+17\. Criar deformação lateral causada pelo ombro do pneu. Isso permitirá que rodas empurrem montes contra as paredes dos sulcos.
+
+18\. Modelar bulldozing de maneira consistente. Diferencial, protetor de cárter, para-choque e pneus devem conseguir empurrar areia, com resistência proporcional ao estado do solo e à geometria de contato.
+
+19\. Adicionar high-centering por superfície de contato, não apenas pontos de amostragem. Utilizar pequenas regiões ou geometrias simplificadas sob o veículo.
+
+20\. Fazer pressão do pneu afetar geometria e física. Contact patch, rigidez lateral, deformação visual, batida de aro e risco de destalonamento precisam compartilhar parâmetros calibrados.
+
+21\. Permitir que pedras se tornem móveis quando descobertas. Uma pedra inicialmente enterrada pode ser sustentada pela areia, perder apoio após erosão e passar a interagir dinamicamente com o Jolt.
+
+A literatura e o código do [Project Chrono](https://www.projectchrono.org/?utm_source=chatgpt.com) são referências relevantes para o acoplamento entre veículos e solos deformáveis; o módulo DEM também possui exemplos de interação granular com corpos rígidos. api.projectchrono.org +1
+
+### C. Comportamento físico da areia — P1
+
+22\. Implementar avalanche com fluxo conservativo. Quando uma encosta fica instável, transferir quantidades calculadas de material entre células, em vez de suavizar alturas indiscriminadamente.
+
+23\. Separar ângulo de repouso estático e ângulo dinâmico. A areia pode permanecer estável até certo limiar e continuar escoando até alcançar outro. Isso evita oscilações artificiais.
+
+24\. Permitir propriedades diferentes em cada região. Areia grossa, fina, compactada e úmida não precisam compartilhar o mesmo ângulo de repouso de 33°.
+
+25\. Adicionar histerese de avalanches. Depois que a areia começa a escorrer, seu comportamento pode diferir daquele necessário para iniciar o movimento.
+
+26\. Modelar dilatância granular. Areia densamente compactada pode expandir em volume durante cisalhamento, enquanto areia solta pode contrair. É uma propriedade importante ausente de um modelo baseado somente em heightfield.
+
+27\. Introduzir compactação progressiva. A primeira passagem pode deformar bastante o terreno, enquanto passagens subsequentes encontram uma região mais resistente.
+
+28\. Criar recuperação superficial lenta. Vento e movimentações pequenas podem suavizar marcas com o tempo, sem apagar instantaneamente a compactação profunda.
+
+29\. Permitir formação de montes na frente das rodas. Em atolamentos, o material removido deve formar uma barreira capaz de resistir mecanicamente a tentativas posteriores de avanço.
+
+30\. Implementar deslocamento transversal real. Rodas esterçadas e arrasto lateral precisam gerar fluxo de areia orientado, não somente um sulco vertical.
+
+31\. Criar o fenômeno de soterramento progressivo. Objetos podem ficar parcialmente cobertos, enquanto pneus e chassi encontram resistência crescente.
+
+32\. Simular deposição no sotavento de obstáculos. Usar sombra aerodinâmica, direção do vento, geometria da rocha e capacidade de transporte de sedimentos.
+
+33\. Separar saltation, suspensão e deslocamento superficial. A areia transportada pelo vento não se comporta toda da mesma maneira: parte salta, parte permanece suspensa e parte se desloca perto do solo.
+
+34\. Permitir erosão localizada por vento e tráfego. Obstáculos e rodas mudam o fluxo, deixando regiões expostas e outras protegidas.
+
+As recomendações 22–34 se relacionam diretamente ao estudo [Windblown Sand Around Obstacles](https://www-sop.inria.fr/reves/Basilic/2024/RDBC24/?utm_source=chatgpt.com), ao projeto [Oasis](https://github.com/Clocktown/Oasis?utm_source=chatgpt.com) e à física granular do [Matter](https://github.com/larsblatny/matter/?utm_source=chatgpt.com). São caminhos para transformar uma deformação visual em uma evolução mais coerente da superfície. www-sop.inria.fr +2
+
+### D. Partículas 3D, MLS-MPM e interação volumétrica — P2/P3
+
+35\. Construir primeiro um protótipo MLS-MPM isolado, sem tentar integrar imediatamente toda a engine.
+
+36\. Validar o solver inicialmente em 2D com testes de queda, empilhamento, cisalhamento e colapso antes de evoluir para 3D.
+
+37\. Implementar transferência P2G/G2P corretamente. A transferência entre partículas e grade precisa conservar massa e respeitar momento linear dentro das tolerâncias numéricas.
+
+38\. Utilizar APIC/MLS-MPM como ponto de partida, estudando redução de dissipação numérica em comparação com PIC básico.
+
+39\. Implementar o modelo constitutivo Drucker–Prager para areia, incluindo deformação elástica, plasticidade e condições de escoamento.
+
+40\. Avaliar modelos constitutivos mais avançados. Drucker–Prager é uma boa base, mas modelos críticos e hipoplásticos podem representar melhor densidade inicial, dilatância e históricos complexos de carregamento.
+
+41\. Criar uma grade 3D ativa e esparsa. Não processar um volume gigantesco vazio apenas para representar pequenos montes ao redor de pneus.
+
+42\. Concentrar resolução nas regiões de interação. Volume granular perto de uma roda ou obstáculo é mais valioso do que o mesmo número de partículas distribuído por uma grande duna.
+
+43\. Usar domínios locais reposicionáveis sem teletransportar partículas. Ao deslocar uma janela de simulação, remapear posições, velocidades, massa e histórico de deformação.
+
+44\. Adicionar colisão por SDF para objetos complexos. Rodas, rochas e protetores de cárter podem ser representados por campos de distância com velocidades de fronteira.
+
+45\. Permitir passagem de areia sobre e sob geometrias tridimensionais. Essa é uma vantagem real do volume granular em relação a um heightfield.
+
+46\. Permitir empilhamento real em cavidades. Caçambas, pranchas, recipientes e espaços entre rochas devem conseguir acumular material localizado.
+
+47\. Implementar emissão de material a partir do terreno. Quando uma região se fragmenta ou é violentamente escavada, transferir uma quantidade explícita de massa para o sistema de partículas.
+
+48\. Implementar reincorporação conservativa. Partículas que se depositam definitivamente precisam devolver massa ao terreno.
+
+49\. Evitar transformar partículas gráficas em partículas físicas automaticamente. Partículas de poeira ou efeitos de impacto podem ser visuais, enquanto material points do MPM transportam massa mecânica.
+
+50\. Comparar duas técnicas de acumulação P2G no WebGPU: atomics inteiros em ponto fixo e loops de compare-and-swap para floats, avaliando desempenho, precisão e risco de overflow.
+
+51\. Controlar a condição CFL e estabilidade constitutiva. O substep granular pode precisar ser menor que os 8,33 ms do Jolt; ambos não devem ser forçados a compartilhar o mesmo passo interno.
+
+52\. Prototipar DEM localizado como alternativa ao MPM. Especialmente para alguns milhares de pedras/grãos grandes, travamento granular, resistência ao rolamento e colapsos de pequenos montes.
+
+A especificação WGSL de julho de 2026 descreve atomics apenas para `i32` e `u32`. Portanto, a acumulação P2G de ponto flutuante requer uma estratégia deliberada. Os repositórios `harri665/MPM` e `Zarathos94/mls-mpm-gpu` demonstram soluções distintas desse problema. w3.org +2
+
+### E. Visual de areia e iluminação — P1/P2
+
+53\. Preservar Deliot–Belcour como referência principal dos glints, ajustando o filtro espacial e temporal conforme a distância.
+
+54\. Criar microcristas orientadas pelo vento que acompanhem direção predominante e relevo, sem depender da posição da câmera.
+
+55\. Distinguir visualmente barlavento e sotavento. O lado exposto ao vento pode ter padrões mais suaves, enquanto a face de deslizamento apresenta outro perfil geométrico.
+
+56\. Adicionar um campo espacial de tamanho aparente de grão, modulando microgeometria, roughness e densidade de glints de forma energeticamente coerente.
+
+57\. Ligar compactação às propriedades ópticas. Regiões pressionadas podem ter microestrutura, porosidade, cor e resposta especular diferentes.
+
+58\. Ligar umidade às propriedades ópticas e mecânicas, evitando tratar areia escura apenas como uma alteração de cor.
+
+59\. Gerar bordas irregulares de sulcos. A rugosidade das paredes deve depender do material, da velocidade e do cisalhamento do pneu.
+
+60\. Adicionar iluminação indireta quente da areia ao chassi e às rochas, preservando oclusão e evitando somar luz fictícia em regiões sem visibilidade do solo.
+
+61\. Manter o deslocamento do terreno idêntico nos passes de cor e sombra. Isso é essencial para sombras fisicamente alinhadas aos sulcos reais.
+
+62\. Distinguir nuvens, poeira fina e partículas granulares grandes. Esses fenômenos exigem escalas, densidades, iluminação e movimento próprios.
+
+O artigo de [Deliot e Belcour (2023)](https://diglib.eg.org/items/d3e19c8a-e9e3-424b-be75-8b984153b39b?utm_source=chatgpt.com) e o trabalho [Rendering Glinty Granular Materials in Virtual Reality (2022)](https://diglib.eg.org/items/7abc3b88-b53b-4fd6-90f8-e06d9619720b?utm_source=chatgpt.com) continuam muito pertinentes para a estabilidade visual da areia em tempo real.
+
+### F. Veículos, danos, áudio e resposta perceptiva — P1/P2
+
+63\. Migrar completamente a dinâmica de corpos rígidos para Jolt, eliminando a dupla autoridade entre suspensão e capotagem.
+
+64\. Implementar diferenciais reais e bloqueáveis, com comportamento consistente em piso de baixa e alta aderência.
+
+65\. Criar suspensão de eixo rígido e torção de longarina, respeitando a geometria real das juntas para evitar constraints redundantes.
+
+66\. Modelar deformação de pneus com estado mecânico, não apenas efeitos visuais de sidewall bulge.
+
+67\. Associar dano às forças e energia dissipada em impactos, diferenciando impactos rígidos de resistência granular prolongada.
+
+68\. Alimentar a emissão de areia e poeira com a dissipação física, levando em conta velocidade, slip e cisalhamento, sem produzir partículas arbitrárias.
+
+69\. Usar AudioWorklet para sintetizar os eventos físicos de atrito granular, impacto de partículas, transmissão, suspensão, motor e escapes.
+
+70\. Transformar as forças do contato em sinais hápticos, respeitando limitações reais de controle e force feedback no navegador.
+
+Para o sistema veicular, [JoltPhysics.js](https://github.com/jrouwe/JoltPhysics.js?utm_source=chatgpt.com) e [Project Chrono](https://github.com/projectchrono/chrono?utm_source=chatgpt.com) permanecem as principais referências de arquitetura. Para sons granulares, o PhISEM já previsto deve continuar como parte do plano.
+
+### G. Desempenho, testes e ferramentas de desenvolvimento — P0/P1
+
+71\. Criar benchmarks reproduzíveis para cada solver, isolando física veicular, deformação de terreno, MPM e renderização.
+
+72\. Medir CPU, GPU e transferência de dados separadamente. O FPS total não mostra onde a simulação está gastando tempo.
+
+73\. Testar conservação de massa por longas sequências, incluindo escavações, avalanches e reinicialização de domínios locais.
+
+74\. Criar referências CPU simplificadas para os kernels GPU, comparando resultados de pequenas cenas.
+
+75\. Testar explicitamente estabilidade de SVD e plasticidade, inclusive casos degenerados que causam valores não finitos.
+
+76\. Implementar profiling por fase do MPM, separando limpeza da grade, P2G, atualização de tensões, integração, G2P e renderização.
+
+77\. Adicionar uma visualização de debug físico mostrando contatos, normais, pressões, densidades, compactação, fluxos e campos de distância.
+
+78\. Criar replays determinísticos ou aproximadamente reproduzíveis, registrando versões, seeds, parâmetros e eventos de deformação.
+
+79\. Estabelecer gates por percentis de desempenho, incluindo p95/p99 e testes de piores casos, não somente média de FPS.
+
+80\. Manter presets PC distintos dos presets móveis. A redução de resolução, número de partículas, qualidade de nuvens e amostras não deve degradar o modelo físico escolhido para Ultra PC.
+
+### 5\. Os papers que eu estudaria primeiro
+
+Eles formam uma trilha mais direta para melhorar a areia do DuneFlow do que simplesmente pesquisar demonstrações de partículas visualmente impressionantes.
+
+| Ordem | Publicação                                                                                                          | Contribuição para o DuneFlow                                           |
+| ----- | ------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| 1     | A Moving Least Squares Material Point Method with Displacement Discontinuity and Two-Way Rigid Body Coupling — 2018 | Fundamentos de MLS-MPM, transferências e contato com sólidos           |
+| 2     | Drucker-Prager Elastoplasticity for Sand Animation — 2016                                                           | Plasticidade e deformação plausível da areia                           |
+| 3     | Windblown Sand Around Obstacles — 2024                                                                              | Deposição, erosão e avalanches em torno de rochas e obstáculos         |
+| 4     | Oasis: A Real-Time Hydraulic and Aeolian Erosion Simulation with Dynamic Vegetation — 2025                          | Transporte de sedimentos por vento e água                              |
+| 5     | Numerical Homogenization of Sand from Grain-Level Simulations — 2025                                                | Obtenção de propriedades constitutivas a partir de simulação granular  |
+| 6     | Volume-Preserving LBM-MPM Coupling for Air-Water-Sand Mixtures — 2026                                               | Acoplamento entre areia, água e ar com atenção à conservação de volume |
+| 7     | Windblown Sand Around Obstacles — estudo e validação                                                                | Comparar padrões simulados com depósitos reais de sedimento            |
+| 8     | A Modular Hypoplastic Constitutive Model for Granular Soils — 2025                                                  | Densidade, estado crítico, contração e dilatância                      |
+| 9     | Augmented Vertex Block Descent — SIGGRAPH 2025                                                                      | Solvers alternativos de contato rígido/soft-body para estudos GPU      |
+| 10    | On Hybrid Lagrangian-Eulerian Simulation Methods — curso de 2019                                                    | Fundamentos e implementação eficiente de MPM                           |
+
+O principal salto científico seria combinar três linhas de pesquisa: terramecânica para o contato pneu–solo, MPM/DEM para o fluxo volumétrico e transporte conservativo para a evolução da paisagem.
+
+Uma única dessas técnicas, isoladamente, não resolve todas as necessidades do DuneFlow.
+
+### 6\. Minha proposta concreta de implementação da areia
+
+Eu criaria quatro sistemas novos e manteria os principais sistemas já existentes.
+
+### Arquitetura sugerida de arquivos
+
+```text
+src/
+  terrain/
+    core/
+      TerrainMaterialState.ts
+      TerrainContactProxy.ts
+      SedimentMassLedger.ts
+      TerrainStateSync.ts
+    transport/
+      ConservativeSandFlux.ts
+      AvalancheSolver.ts
+      WindTransport.ts
+      RockDeposition.ts
+    mechanics/
+      SandTerramechanics.ts
+      CompactionModel.ts
+      SoilShearHistory.ts
+    gpu/
+      ToroidalCascade.ts
+      BrushEncoder.ts
+      TerrainFieldBindings.ts
+
+  granular/
+    core/
+      GranularSystem.ts
+      GranularDomain.ts
+      ParticleMassTransfer.ts
+    webgpu/
+      LocalMPM.ts
+      MPMBuffers.ts
+      MPMComputePipeline.ts
+      shaders/
+        clear.wgsl
+        p2g.wgsl
+        constitutive.wgsl
+        grid-update.wgsl
+        g2p.wgsl
+        collisions.wgsl
+    validation/
+      MPMGoldenTests.ts
+      GranularBenchmarks.ts
+
+  physics/
+    jolt/
+      JoltWorld.ts
+      JoltQueries.ts
+      JoltLifetime.ts
+    coupling/
+      MixedContactResolver.ts
+      TerrainRigidCoupler.ts
+
+  rendering/
+    sand/
+      GranularOptics.ts
+      SandSurfaceDetail.ts
+      ParticleSandRenderer.ts
+    lighting/
+      UltraCSM.ts
+      SandBounceSH.ts
+```
+
+Os caminhos são sugestões de arquitetura, não arquivos cuja existência no repositório atual foi confirmada.
+
+### A integração mais delicada: massa do terreno e partículas MPM
+
+Se a roda lançar um volume de areia para o ar, a transição precisa seguir um fluxo controlado:
+
+* Contato da roda: o SCM determina forças, cisalhamento e material deslocado, enquanto Jolt recebe a reação mecânica.
+
+* Débito no terreno: o sistema registra a massa que será retirada da região escavada e debitada uma única vez.
+
+* Emissão granular: o volume removido é representado por material points MPM ou por um reservatório de sedimento em transporte.
+
+* Movimento das partículas: a GPU simula trajetória, colisões, empilhamento e interação com obstáculos.
+
+* Deposição: partículas que se estabilizam podem ser convertidas novamente em massa do terreno, preservando momento e volume dentro de tolerâncias definidas.
+
+O desafio é que a GPU não deve produzir duas cópias da mesma areia: uma como heightfield deformado e outra como partículas fisicamente independentes.
+
+Um detalhe importante: a emissão visual de poeira não precisa debitá-la diretamente do solo se ela for tratada como representação de um fluxo já contabilizado. A regra é impedir que duas representações sejam consideradas duas fontes físicas diferentes.
+
+### A fronteira entre simulação e visualização
+
+Eu adotaria esta política:
+
+| Fenômeno                                | Sistema autoritativo                                           |
+| --------------------------------------- | -------------------------------------------------------------- |
+| Força do solo sobre pneus               | Bekker/SCM CPU                                                 |
+| Colisão do chassi com pedras            | Jolt                                                           |
+| Altura mecânica perto do veículo        | TerrainContactProxy                                            |
+| Redistribuição de sedimento superficial | Solver conservativo de terreno                                 |
+| Partículas MPM experimentais            | WebGPU, inicialmente sem autoridade sobre as forças do veículo |
+| Poeira e grãos puramente visuais        | Renderer/VFX                                                   |
+| Acoplamento futuro MPM–Jolt             | Pesquisa separada, exigindo validação bidirecional             |
+
+Isso é especialmente importante porque, se o MPM estiver somente na GPU, devolver forças de contato ao Jolt em WASM a 120 Hz por meio de readback síncrono pode provocar stalls e destruir o orçamento de frame.
+
+A solução de produção continua usando o SCM para forças. Um acoplamento futuro pode estudar forças integradas assíncronas, previsão CPU e correções de baixa frequência, mas não deve ser apresentado como equivalente a contato granular bidirecional exato.
+
+### 7\. Plano de evolução: do terreno atual à areia volumétrica
+
+Em vez de colocar tudo nos seis marcos anteriores, eu dividiria a evolução granular em oito etapas de aceitação independentes.
+
+| Etapa                          | Entrega                                                      | Resultado que precisamos observar                                     |
+| ------------------------------ | ------------------------------------------------------------ | --------------------------------------------------------------------- |
+| 1 — Fundação                   | Estado do solo, camadas, massa e sincronização CPU/GPU       | Trilhas persistentes sem divergência de colisão                       |
+| 2 — Deformação conservativa    | Fluxo lateral, avalanches e compactação                      | Escavar não cria nem destrói material indevidamente                   |
+| 3 — Contato veicular           | Pneu multiponto, high-centering e resistência de sulcos      | Veículo atola, escava e recupera tração de forma coerente             |
+| 4 — Erosão ambiental           | Transporte eólico e deposição em rochas                      | Depósitos e erosão dependem da direção do vento                       |
+| 5 — Areia visual AAA           | Microcristas, glints, bordas e partículas vinculadas ao solo | Realismo estável em 1440p/4K                                          |
+| 6 — Laboratório WebGPU         | MLS-MPM 2D, depois 3D isolado                                | Conservação, plasticidade e benchmarks reproduzíveis                  |
+| 7 — Volume granular localizado | Partículas tridimensionais em pneus, rochas e cavidades      | Areia pode escorrer e se empilhar em 3D                               |
+| 8 — Acoplamento avançado       | Massa compartilhada e pesquisa de forças bidirecionais       | Transição terreno–partículas sem duplicidade, stalls ou instabilidade |
+
+### Configuração inicial do laboratório MLS-MPM
+
+Eu começaria medindo estas três configurações, sem assumir que qualquer uma delas cumprirá o orçamento:
+
+| Perfil de experimento | Partículas      | Grade    | Finalidade                                               |
+| --------------------- | --------------- | -------- | -------------------------------------------------------- |
+| Validação             | 4.096–16.384    | 32³      | Validar matemática, plasticidade, contatos e conservação |
+| Intermediário         | 32.768–65.536   | 48³–64³  | Investigar deformação granulada localizada               |
+| Estresse              | 131.072 ou mais | 64³–128³ | Medir limites, atomics, memória e escalabilidade         |
+
+O número de partículas não define sozinho a resolução física. Também é necessário escolher tamanho das células, massa representada por partícula, dimensões do domínio e número de substeps.
+
+Por exemplo, uma caixa de 4 × 4 × 0,4 m com 65.536 material points uniformemente distribuídos teria um espaçamento médio volumétrico da ordem de 4,6 cm. Esses pontos representam volumes de material, não grãos individuais de areia de poucos décimos de milímetro.
+
+Para uma grade 64³ com 32 bytes por célula, apenas um buffer completo ocupa aproximadamente 8 MiB. Estados adicionais, acumuladores, campos de colisão, partículas e buffers intermediários aumentam significativamente esse consumo.
+
+Em WebGPU, o dimensionamento deve considerar os limites efetivamente expostos por `GPUDevice.limits`, não pressupor que todos os PCs suportem o mesmo conjunto de recursos.
+
+### Gates de desempenho propostos
+
+Para uma máquina de referência com RX 6600, eu estabeleceria metas experimentais e ajustaria após profiling:
+
+* Física rígida + terramecânica: preservar 120 Hz, medindo custo total dos ticks e estabilidade dos contatos.
+
+* Terreno deformável: manter a funcionalidade atual enquanto a conservação e as camadas são adicionadas.
+
+* MLS-MPM isolado: tentar inicialmente um orçamento incremental de até 3 ms de GPU por frame a 60 fps; ultrapassar esse valor não significa fracasso científico, mas impede ativação automática no Ultra.
+
+* Renderização: medir custo adicional em 1080p e 1440p, especialmente nos shaders de areia e shadow passes.
+
+* Memória: registrar armazenamento GPU por buffer, crescimento de heap WASM e alocações transitórias por frame.
+
+O orçamento total a 60 fps é 16,67 ms; a 120 fps, 8,33 ms; e a 144 fps, aproximadamente 6,94 ms. Essas metas de frame são distintas da frequência interna da física.
+
+### 8\. Testes que devem decidir se a simulação é realmente boa
+
+### Matriz de validação do sistema granular
+
+0 de 9 critérios marcados para o plano de testes
+
+Limpar
+
+Pilha de areiaFormar um cone e medir inclinação, relaxamento e massa final
+
+Colapso de colunaRemover uma parede e comparar a geometria de espalhamento
+
+Roda em areia soltaMedir sinkage, resistência, torque, slip e sulco
+
+Passagens repetidasVerificar compactação e diferenças entre primeira e última passagem
+
+Rocha parcialmente enterradaRetirar sedimento até perder apoio e verificar a colisão dinâmica
+
+Obstáculo com ventoMedir erosão e deposição nos lados exposto e protegido
+
+Janela MPM móvelMover o domínio repetidamente sem saltos, duplicações ou perda de massa
+
+Carga extremaRodar com bursts de brushes, pedras e partículas por longos períodos
+
+Paridade CPU/GPUComparar cenários pequenos com uma implementação de referência
+
+ Copiar matriz de testes
+
+A validação deve distinguir explicitamente testes qualitativos de testes quantitativos. Ver uma pilha visualmente convincente não comprova conservação, estabilidade nem calibração física. Para resultados quantitativos, vale usar referências CPU, experimentos reproduzíveis e, quando disponíveis, medições de campo ou de laboratório.
+
+### 9\. O que eu evitaria implementar agora
+
+Há algumas abordagens que parecem tecnicamente impressionantes, mas podem atrasar o projeto sem resolver seus problemas principais.
+
+Primeiro, não substituiria o terreno inteiro por partículas MLS-MPM. Isso aumenta muito a complexidade sem necessidade. As cascatas toroidais continuam adequadas para dunas grandes, sulcos persistentes e deformação superficial.
+
+Segundo, não começaria por DEM com milhões de grãos. O método é valioso para contatos granulares individuais e calibração, mas o custo de contatos, vizinhança e substeps pode ser excessivo para uma simulação off-road completa no browser.
+
+Terceiro, não migraria todo o DuneFlow para WebGPU apenas para habilitar MPM. A documentação do Three.js ainda trata o `WebGPURenderer` como experimental e exige adaptações importantes para materiais customizados e pós-processamento.
+
+Quarto, não confundiria uma simulação de fluido com uma simulação de areia. MPM pode representar ambos, mas o comportamento depende do modelo constitutivo. Um solver MLS-MPM que movimenta líquido não passa automaticamente a simular areia com atrito interno e plasticidade correta.
+
+Quinto, não usaria estimativas de desempenho de outras GPUs como promessas para a RX 6600. O desempenho depende do algoritmo implementado, da resolução, do driver, do navegador e do restante do pipeline.
+
+### 10\. A oportunidade mais promissora
+
+Entre todas as propostas, há uma combinação especialmente interessante:
+
+Terreno conservativo + propriedades históricas do solo + contatos reais de pneus + volume MLS-MPM localizado.
+
+Ela permite construir uma progressão em que cada fase produz um ganho visível e mecânico, mesmo antes de o MPM ficar pronto. A areia deixa de ser somente um heightmap deformável e passa a carregar memória física: material escavado, redistribuído, compactado, saturado ou transportado.
+
+Depois, a parte volumétrica adiciona fenômenos que o heightfield não consegue representar bem, como areia escorrendo por superfícies com saliências, acumulando-se em cavidades e interagindo com obstáculos tridimensionais.
+
+O relatório original priorizava corretamente o núcleo veicular. Com as pesquisas adicionais, eu acrescentaria uma segunda prioridade igualmente estrutural: fazer a areia conservar material e responder à história de deformações antes de aumentar a contagem de partículas.
+
+Essa seria a base mais sólida para transformar o DuneFlow em um simulador de terreno granular realmente avançado, preservando a diretriz PC-First e deixando WebGPU/MLS-MPM evoluir como uma tecnologia de alto realismo, sem comprometer o funcionamento do sistema principal.

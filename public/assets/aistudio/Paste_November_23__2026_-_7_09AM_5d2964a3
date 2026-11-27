@@ -1,0 +1,142 @@
+Esta é a arquitetura técnica e de pesquisa aprofundada para a próxima geração do DuneFlow, projetada sob a diretriz PC-First para atingir o estado da arte em simulação física, gráfica e acústica no navegador (WebGL2/WebGPU, WASM, TypeScript, Three.js r187).
+1. Auditoria de Projetos Open-Source & Referências Técnicas
+Abaixo está a auditoria detalhada dos ecossistemas avaliados, além de descobertas adicionais altamente estratégicas para o DuneFlow, filtradas para compatibilidade com Three.js r187 + Vite + TypeScript.
+| Repositório / Projeto | Licença | Maturidade & Manutenção | Custo de Bundle / WASM | Compatibilidade Web / Vite | Veredito: Copiar vs. Instalar |
+|---|---|---|---|---|---|
+| jrouwe/JoltPhysics.js | MIT | Excelente. O padrão ouro moderno para física em jogos/C++. Compila oficial e frequentemente para WASM via Emscripten. | ~800KB–1.2MB (WASM gzip). Zero alocações de GC em runtime se usar wrappers destroy(). | Alta. Requer configuração de vite-plugin-wasm ou servir o .wasm via public/ ou ?url. Suporta SharedArrayBuffer/Workers no PC. | INSTALAR (Dependência Core). Substitui solvers manuais por CCD 6-DOF, Shape-Cast e Veículos nativos. |
+| gkjohnson/three-mesh-bvh | MIT | Altíssima. Mantida ativamente e considerada essencial no ecossistema Three.js. | ~30KB (JS/TS puro). | Nativamente projetada para Three.js. | INSTALAR (Complementar). Perfeita para consultas geométricas rápidas na UI, geração de hulls para o Jolt e raycasting de folhagem/detalhe sem sujar a física. |
+| projectchrono/chrono | BSD-3 | Extrema. Referência acadêmica e industrial para terramecânica SCM e trens de força. | C++ pesado (não recomendado para WASM no browser). | Baixa para uso direto. | COPIAR ALGORITMOS. Extrair a matemática de ChShaftsDrivetrain (inércia acoplada, conversor de torque) e a formulação multi-roda da matriz SCM. |
+| RigsOfRods/rigs-of-rods | GPL-3.0 | Madura (Comunidade ativa). Simuladora pioneira de chassi flexível soft-body. | C++ (Incompatível via licença GPL para código fechado e arquitetura pesada). | Nenhuma direta. | ESTUDAR CONCEITOS. Copiar a topologia de feixes Beam-Node para modelar a torção da longarina (Ladder-Frame Flex) sem infligir a GPL (implementar via XPBD/Constraints próprias). |
+| takram-design-engineering/three-geospatial (@takram/three-atmosphere) | MIT | Muito Alta. Implementação fidedigna de Bruneton/Hillaire com suporte avançado a TSL e WebGL2. | ~60KB + LUTs pré-computadas (ou geradas via shader). | Nativa para Three.js moderno e pós-processamento. | INSTALAR (ou Extrair Shaders). Superior a qualquer céu analítico simples. Permite cálculo real de transmitância e espalhamento aéreo. |
+| YigitSalihEmecen/Engine_Sim & Engine-Simulator/engine-sim-community-edition | MIT | Alta (C++ original) / Boa (Web Audio port). | ~15KB (TypeScript/AudioWorklet) no port web. | Requer vite configurando AudioWorklet como worker ou ?url. | COPIAR ARQUITETURA. Implementar o motor de Waveguide e oscilação de pressão de cilindros direto em um AudioWorkletProcessor. |
+| dgreenheck/threejs-particle-fluids & bandinopla/threejs-fluid-simulation | MIT | Educacional / Experimental. | Leve (Shaders + BufferGeometries). | Boa. | INSPIRAR-SE / ADAPTAR. Os métodos de ping-pong de velocidade e advection em GPU 2D são a base perfeita para o rastro aerodinâmico de poeira no modo PC Ultra. |
+Descobertas Estratégicas Adicionais (Projetos Valiosos no GitHub)
+ * pmndrs/racing-game (MIT): Excelente arquitetura de referência em TypeScript de integração de física de veículos, gerenciamento de câmera elástica e áudio reativo no navegador.
+ * hku-cg/mpm-gpu / taichi-dev/taichi.js (MIT/Apache-2): Implementações de MLS-MPM em Compute Shaders. Uso: Estudar a estrutura de grid P2G/G2P (Particle-to-Grid / Grid-to-Particle) para nosso modo experimental de areia 3D em WebGPU.
+ * erwincoumans/bullet3 (ammo.js) vs Jolt: Jolt vence com folga em estabilidade de veículos, multi-threading (pthreads no PC) e ergonomia de API moderna para Shape-Cast.
+ * schteppe/cannon-es (MIT): Ignorar para este projeto; seu solver de contatos por impulso não aguenta a rigidez necessária para rock crawling e acoplamento de múltiplos diferenciais a 120Hz sem jitter.
+ * mrdoob/three.js -> examples/jsm/csm/CSM.js & WebGPURenderer / TSL: A partir da r167+, o TSL (Three.js Shading Language) na r187 é a peça angular que permite escrever shaders uma única vez para WebGL2 e WebGPU (com Compute Shaders no WebGPU).
+ * m-schuetz/Potree (BSD-2) / gkjohnson/three-gpu-pathtracer (MIT): Embora o pathtracer seja offline, as técnicas de amostragem temporal e denoising de three-gpu-pathtracer oferecem ideias de otimização para sombras suaves e GI baseado em probes.
+ * lo-th/Oimo.js / dimforge/rapier (Apache-2): Rapier (@dimforge/rapier3d) é o único concorrente real de Jolt em WASM. Decisão: JoltPhysics.js possui um módulo nativo de veículos e Character/Wheel Shape-Cast infinitamente mais avançado e testado para off-road pesado (com suporte direto a curvas de suspensão, barras estabilizadoras e VehicleConstraint) do que Rapier, onde você teria que programar tudo do zero.
+2. Arquitetura Recomendada: Física Hardcore & Colisões (JoltPhysics.js + Bekker/SCM)
+Veredito Arquitetural: Migração para JoltPhysics.js (WASM)
+Manter um solver TypeScript customizado acelerado por three-mesh-bvh para corpo rígido 6-DOF, colisões contínuas (CCD) e reboques é uma armadilha de engenharia. A resolução simultânea de múltiplos contatos em rochas, restrições de junta esférica/dobradiça para o reboque, prevenção de interpenetração em alta velocidade e a eliminação dos conflitos entre o solver de suspensão e o de capotagem exigem um solver de Restrições Sequenciais de Impulso (Sequential Impulse / Projected Gauss-Seidel) robusto.
+A arquitetura definitiva será:
+ * Motor Físico Core: JoltPhysics.js (WASM) executando a 120 Hz fixos (substeps de ~8.33ms).
+ * Integração de Terreno: Como o Jolt não deve receber heightfields dinâmicos da GPU por frame (o que exigiria readback caro), o sistema SandTerramechanics (CPU Shadow Buffer / Ring Buffer) continuará sendo a fonte da verdade da altura do terreno.
+ * Acoplamento Mágico (Sem GPU Readback): A interface entre Jolt e o seu modelo Bekker/SCM se dará através de uma Ponte de Contato Customizada dentro do ciclo de física antes de PhysicsSystem.Update().
+Engenharia Detalhada dos Subsistemas Off-Road
+1. Rodas por Shape-Cast / Arco Multi-Ponto
+Em vez de um raycast fino (PhysicsSystem.GetNarrowPhaseQuery().CastRay()), no passo de física do Jolt executaremos um CastShape utilizando um CylinderShape (representando a largura e raio do pneu) ao longo do vetor de curso da suspensão (de top-out até bump-stop).
+ * Como funciona com rochas e areia simultaneamente:
+   * O CastShape do Jolt colide contra as malhas estáticas das rochas (usando MeshShape ou ConvexHullShape pré-gerados) e obstáculos (rampas, pranchas Maxtrax, pedras dinâmicas). Isso retorna o ponto de contato exato na quina da pedra e a normal da superfície!
+   * Em paralelo, amostramos o arco da banda de rodagem (-35° a +35° em 5 ou 7 pontos discretos ao longo do comprimento de contato l_c) diretamente contra a matriz CPU de altura de areia do SandTerramechanics.
+   * Fusão: O menor valor de distância livre entre [Rocha do Jolt] e [Areia do Ring Buffer] define a compressão real da mola da suspensão e o ponto de aplicação de força. Se o contato for Rocha, usa atrito Coulomb/Pacejka simplificado com a normal 3D da quina; se for Areia, aciona a tensão normal e de cisalhamento de Bekker-Wong & Janosi-Hanamoto (\sigma = (k_c/b + k_\phi) z^n).
+2. Trem de Força 4×4 Completo (Drivetrain Engine)
+Não usaremos o sistema de motor simplificado do Jolt (WheeledVehicleController padrão) isoladamente. Implementaremos um Solver de Trem de Força (inspirado no ChShaftsDrivetrain do Project Chrono) em TypeScript (ou dentro de um módulo C++/WASM acoplado) que calcula o torque real chegando às 4 rodas e alimenta o Jolt com os torques resultantes via Wheel.SetTorque().
+ * Diferenciais (Aberto, LSD, Bloqueado):
+   * Aberto: Divide o torque de entrada igualmente (50\% / 50\%). A velocidade angular do eixo é a média (\omega_{\text{eixo}} = (\omega_E + \omega_D)/2). Se uma roda patina no ar ou lama, ela consome a velocidade e a outra fica sem força.
+   * LSD (Torsen/Viscoso): Aplica um torque de acoplamento resistente proporcional à diferença de rotação: \tau_{\text{lock}} = \text{clamp}(k_{\text{visc}} \cdot (\omega_E - \omega_D), -\tau_{\max}, \tau_{\max}).
+   * Bloqueio (Locker - Dianteiro/Traseiro): Impõe uma restrição dura onde \omega_E = \omega_D. Em superfícies firmes (rocha seca), a diferença de distância percorrida nas curvas gera torque parasita oposto nas rodas internas/externas (Driveline Wind-Up), aumentando drasticamente o raio de giro e causando wheel-hop ou estalos mecânicos realistas.
+3. High-Centering & Arrasto Real de Barriga (Undercarriage Drag)
+Para simular atolamento real em cristas centrais e proteção de cárter:
+ * Definimos no chassi 6 a 8 pontos virtuais de amostragem inferior (eixo dianteiro/diferencial, cárter, caixa de transferência, longarinas esquerda/direita, diferencial traseiro).
+ * A cada frame da física (120Hz):
+   * Projetamos esses pontos no mundo.
+   * Lemos a elevação da areia no SandTerramechanics (e testamos CastRay curto para rochas).
+   * Se altura_chassi_ponto < altura_areia (penetração z_u > 0):
+     * Força Vertical (Sustentação / High-Centering): Aplicamos uma força de empuxo/contato ascendente proporcional a z_u e à área da peça no corpo rígido do Jolt. Resultado natural: Essa força sustenta o chassi no Jolt, reduzindo automaticamente a carga normal (F_z) sobre as 4 molas da suspensão! As rodas perdem tração exatamente como na vida real.
+     * Arrasto Longitudinal (Aragem): Aplicamos uma força contrária à velocidade de deslocamento usando modelo de resistência passiva do solo (bulldozing resistance).
+     * Deformação no Terreno: Registramos um pincel de deslocamento de largura do diferencial no BrushEncoder para que o diferencial traseiro realmente are e escave a crista central conforme o carro passa.
+4. Risco Real de PSI Extremo (Debeading & Batida Seca)
+A pressão selecionada pelo jogador (10 a 36 PSI) modifica matematicamente três parâmetros do pneu:
+ * Área de Contato (b \times l): 10 PSI aumenta a área de contato em ~180%, reduzindo a pressão média sobre o solo e evitando afundamento na areia (flutuação extrema).
+ * Rigidez Lateral da Carcaça (C_\alpha): Pneus a 10 PSI têm parede lateral molenga, gerando atraso na resposta do volante (slip angle maior) e deformação visual extrema (WPO Sidewall Bulge).
+ * Curso Limite de Esmagamento (Rim-Strike): O raio dinâmico mínimo antes do aro bater no obstáculo é reduzido. Se a deflexão vertical causada por uma quina de pedra (via CastShape) exceder a altura da parede lateral flexível, um impulso duro (mola quase rígida do alumínio do aro) é aplicado ao Jolt, acionando som metálico de impacto, faíscas e possível dano estrutural.
+ * Risco de Destalonamento (Debeading): Se (PSI < 14) E (Força Lateral no Pneu > Limiar Proporcional à Pressão) (ex: curva agressiva em alta velocidade ou deslize lateral batendo em vala), há risco acumulado. Quando rompe, o pneu vai instantaneamente para 0 PSI, perde 90\% da rigidez lateral e trava a direção para aquele lado até o reparo.
+5. Torção do Chassi de Longarina (Ladder-Frame Flex) & Eixo Rígido (Solid Axle)
+ * Solid Axle (Eixo Rígido): Em vez de usar 4 suspensões independentes genéricas, um eixo rígido é modelado conectando fisicamente as duas rodas em um corpo rígido próprio (ou calculando a posição cinemática onde a subida da roda esquerda gira a linha do eixo inteiro, induzindo câmber oposto na roda direita e mantendo o vão livre do diferencial constante entre elas). O Jolt permite acoplar as duas rodas a um Body de eixo usando HingeConstraint / molas nos braços (trailing arms).
+ * Ladder-Frame Flex (Torção do Chassi): Dividimos o caminhão em dois corpos rígidos no Jolt:
+   * Chassi Dianteiro + Cabine + Motor
+   * Chassi Traseiro + Caçamba
+     Eles são unidos no centro por uma SixDOFConstraint (Junta de 6 Graus de Liberdade do Jolt) onde apenas o eixo longitudinal (Roll - torção) possui liberdade angular (\pm 8^\circ), governado por uma mola torcional rígida e amortecedor. O visual acompanha os dois corpos. Em cruzamento extremo de eixos, você vê claramente a caçamba torcer em relação à cabine!
+6. Deformação Plástica, Peças, Pedras Rolantes, Maxtrax & Reboque XPBD
+ * Chassi Composto: CompoundShape no Jolt formado por múltiplas caixas/convexos (para-choque, capô, portas, cárter).
+ * Deformação Plástica por Impacto (Joules): Na callback OnContactAdded do Jolt, calculamos a energia do impacto (E = \frac{1}{2} m_{\text{efetivo}} v_{\text{rel}}^2). Se passar do limiar de escoamento, passamos o ponto de impacto e o vetor impulso para um Vertex Buffer da malha visual do veículo que deforma os vértices próximos permanentemente (amassado) sem precisar alterar o colisor composto instantaneamente.
+ * Peças Arrancadas & Pedras Rolantes: São corpos rígidos do Jolt que colidem com as rochas do Jolt e consultam a altura do terreno CPU para quicar e parar na areia (emitindo poeira e marcas no BrushEncoder).
+ * Guincho / Cabo Elástico & Reboque: O reboque é simplesmente outro corpo rígido com 2 rodas conectado ao engate por uma PointConstraint ou ConeConstraint (com limites de ângulo de articulação) no Jolt, consultando o mesmo SandTerramechanics para deixar 2 sulcos extras! O cabo do guincho usa XPBD (1D chain de partículas) visualmente para balançar e esticar, mas aplica uma força de restrição de distância elástica real (Hooke's Law com amortecimento) diretamente nos corpos rígidos do Jolt.
+3. Salto de Iluminação Realista & Areia Realista (PC Ultra)
+Arquitetura Visual de Ponta (WebGL2 + Preparação TSL)
+Para transformar o visual no nível de Forza Horizon 5 / Uncharted 4 / SnowRunner no PC:
+1. Cascaded Shadow Maps (CSM) Integrado ao Clipmap
+O shadow map único atual sofre de aliasing severo perto do carro e trepidação (shadow swimming) nas dunas distantes.
+ * Solução: Implementar three/addons/csm/CSM.js com 4 cascatas no perfil PC Ultra (resolução 2048x2048 por cascata, texel snapping ativado para evitar cintilação):
+   * Cascata 0 (0m – 8m): Sombra ultra-nítida nos cravos do pneu, molas e para-choque.
+   * Cascata 1 (8m – 30m): Área ao redor do carro, dunas médias e pedras próximas.
+   * Cascata 2 (30m – 120m): Morros e grandes formações rochosas.
+   * Cascata 3 (120m – 600m+): Sombras massivas de grandes dunas no horizonte.
+ * Armadilha com Clipmap: Como o terreno desloca vértices na GPU (vertex displacement lendo a textura toroidal), o customDepthMaterial do terreno PRECISA aplicar exatamente a mesma função de displacement no vertex shader de profundidade do CSM, caso contrário as sombras não acompanham o relevo das dunas!
+2. Atmosfera Física Real (@takram/three-atmosphere) & Sombras de Nuvens
+ * Substituir o céu analítico pelo modelo fisicamente baseado do Takram / Bruneton & Hillaire, onde a luz solar (cor e intensidade) e a dispersão atmosférica (Rayleigh/Mie) respondem fisicamente à altitude do sol e à densidade de poeira suspensa.
+ * Sombras de Nuvens: Em vez de renderizar nuvens volumétricas caríssimas por raymarching em todo frame (que custariam 8-12ms no WebGL), geraremos uma Textura de Máscara de Nuvens 2D (FBM procedural em evolução lenta) projetada no plano mundial (XZ), multiplicando a irradiância da luz solar direta no terreno, rochas e no veículo. Isso cria o icônico movimento dramático de sombras enormes cruzando o deserto a um custo quase nulo (< 0.2 ms).
+3. Rebote Indireto Quente da Areia (GI Leve sem Raytracing)
+No deserto, a areia reflete intensamente a luz solar amarela/laranja para cima, iluminando a barriga do caminhão, as caixas de roda e o interior das sombras.
+ * Solução Multi-Camada:
+   * Light Bounce Direcional Hemisférico (Analítico no Shader): No fragment shader do veículo e das rochas, adicionamos um termo de irradiância vindo do chão (dot(N, vec3(0, -1, 0))), modulado pela cor média do bioma (areia dourada ou lama escura) e multiplicado pela oclusão de altura e Bent Normals calculados no seu GTAOPass.
+   * Paredes da Duna (Multi-Bounce): No shader da areia, o lado sombreado (slip-face) recebe um ganho de luz indireta quente calculado em função da inclinação da normal e da intensidade do sol (pow(1.0 - max(dot(N, L), 0.0), 2.0) * sunColor * sandAlbedo * bounceFactor).
+4. Areia de Referência AAA & Acúmulo em Rochas
+ * Acúmulo de Areia na Base das Rochas (Wind-blown Sand Drift): No shader das rochas e da junção terreno-rocha, usamos uma função de Blend por Altura Mundial + Ângulo de Repouso (\theta < 33^\circ) somado a um mapa de ruído de vento direcional. Onde a normal da rocha aponta para cima e está próxima da altura do terreno naquele ponto, a rocha transiciona suavemente (por Height-Lerping usando máscara de textura) para o material exato da areia, eliminando a "linha dura" de intersecção de polígonos.
+ * Glints Estáveis em 1440p/4K: Ajustar o algoritmo de Deliot & Belcour aplicando Mipmap Bias Dinâmico baseado na derivada de tela (fwidth(vUv)) e filtragem espacial da distribuição normal estocástica. Isso garante que os brilhos dos grãos cintilem realisticamente quando a câmera se move devagar, mas desapareçam suavemente (sem ruído pixelado / aliasing) em 4K à distância.
+5. Veredito Honesto: WebGPU + TSL (Three.js r187) para MLS-MPM Granular
+Veredito: O WebGPURenderer e o sistema TSL (Three.js Shading Language) na r187 estão maduros o suficiente para renderização, mas o suporte a Compute Shaders no browser ainda exige fallback WebGL2 para estabilidade universal (alguns drivers Linux/Windows antigos e Safari ainda apresentam peculiaridades no WebGPU).
+ * Recomendação Prática: Mantenha o motor principal 100% WebGL2 sólido para o jogo base. Crie uma bandeira experimental "PC Ultra (WebGPU)" opcional no launcher/configurações para rodar uma Caixa Local de MLS-MPM 3D (4m × 4m ao redor do veículo com ~65.000 partículas granulares) exclusivamente via WebGPU Compute Shaders. Essas partículas interagem com os pneus como grãos reais sendo arremessados para cima, empilhando na caçamba e escorregando, enquanto o terreno macro continua na ToroidalCascade.
+4. Áudio Físico em AudioWorklet & Force Feedback (PC)
+ * Áudio do Motor & Transmissão por Waveguide (AudioWorklet):
+   * Rejeite totalmente arquivos .wav em loop ou osciladores senoidais simples.
+   * Inspirado no Engine_Sim, implementaremos um Sintetizador Mecânico em tempo real dentro de um AudioWorkletProcessor (Zero-GC, thread dedicada de áudio):
+     * Câmara de Combustão: Simula pulsos de pressão discretos em função da ordem de ignição dos cilindros (ex: V8 ou Diesel 4 cilindros) baseados no ângulo exato do virabrequim (\theta).
+     * Escapamento (Waveguide): Um conjunto de 2 a 4 linhas de atraso (delay lines com filtro passa-baixa de amortecimento) simulam as ondas estacionárias e ressonância do coletor e silencioso.
+     * Eventos Mecânicos: O som do turbo (spool + válvula blow-off ao soltar o acelerador), o chiado agudo da engrenagem reta da reduzida (4L) e o estalo seco (gear-lash clunk) ao aplicar torque repentino nos diferenciais bloqueados são somados diretamente ao sinal de áudio em função das variáveis lidas da física a 120Hz via SharedArrayBuffer ou MessagePort leve.
+ * Controles & Force Feedback (Gamepad API / Volantes):
+   * Uso da Gamepad API com mapeamento completo de curvas de sensibilidade para volantes e pedais.
+   * Force Feedback / Rumble de duplo canal alimentado pelo torque de auto-alinhamento dos pneus no Jolt:
+     * Canal de Baixa Frequência (Rumble pesado): Ativado pelo wheel-hop (pulando em pedra/areia), engasgo em rotação muito baixa e batidas secas de aro (rim strike) no 10 PSI.
+     * Canal de Alta Frequência (Textura): Vibração sutil proporcional ao slip-sinkage e à resistência de esterçamento dentro dos sulcos profundos (rut-wall trapping).
+5. Plano Acionável de Implementação: Top 6 Marcos (PC-First)
+Ordem otimizada pelo maior retorno de realismo físico e impacto visual por esforço de engenharia:
+Marco 1: Núcleo Físico JoltPhysics.js (WASM) + Shape-Cast + Ponte Terramecânica
+ * Referências: jrouwe/JoltPhysics.js, Bekker-Wong / Janosi-Hanamoto.
+ * Arquivos/Passes: Novo PhysicsWorldJolt.ts (roda em WebWorker ou Main Thread sincronizada a 120Hz), substituição do solver de suspensão/capotagem e implementação da função castWheelShape() que combina o colisor de rocha do Jolt com a matriz CPU do SandTerramechanics.
+ * Performance Estimada: ~1.2 ms – 1.8 ms por frame no PC Desktop (para física completa com CCD e 4 rodas + chassi composto).
+ * Degradação Híbrido/Mobile: Reduzir taxa de substep de 120Hz para 60Hz; simplificar CastShape para raycast de 3 pontos na banda em dispositivos fracos.
+ * Armadilha & Prevenção: Vazamentos de memória WASM no Emscripten. Prevenção: Usar pool de vetores reutilizáveis (Jolt.Vec3, Jolt.Quat) pré-alocados no boot e chamar Jolt.destroy() explicitamente apenas quando objetos são removidos da cena.
+Marco 2: Trem de Força 4×4 Real, High-Centering, Solid Axle & Risco 10 PSI
+ * Referências: projectchrono/chrono (ChShaftsDrivetrain), RigsOfRods (Chassi Flex).
+ * Arquivos/Passes: DrivetrainSolver.ts acoplado ao PhysicsWorldJolt.ts. Adicionar as juntas SixDOFConstraint dividindo o chassi para o Ladder-Frame Flex e a amostragem de 8 pontos inferiores alimentando o BrushEncoder.
+ * Performance Estimada: ~0.3 ms (cálculos puramente escalares e consultas em memória L1 no ring buffer).
+ * Degradação Híbrido/Mobile: No perfil Leve, fundir os dois corpos do chassi em um único corpo rígido (desabilitando ladder-frame flex e mantendo diferenciais simples).
+ * Armadilha & Prevenção: Oscilação/instabilidade numérica nos diferenciais bloqueados a baixíssima velocidade. Prevenção: Implementar uma zona morta de clamping viscoso perto de \Delta \omega \approx 0 (amortecimento implícito).
+Marco 3: Cascaded Shadow Maps (CSM) + Integração com Clipmap GPU
+ * Referências: three/addons/csm/CSM.js.
+ * Arquivos/Passes: Atualizar o pipeline de iluminação principal adicionando o gerenciamento das 4 cascatas do CSM e modificar o TerrainMaterial para injetar o displacement toroidal no customDepthMaterial.
+ * Performance Estimada: ~1.5 ms – 2.2 ms em GPU dedicada PC (4 shadow passes, otimizados por frustum culling do clipmap).
+ * Degradação Híbrido/Mobile: Cair para 2 cascatas (1024²) no Híbrido e apenas 1 shadow map direcional simples no Mobile Leve.
+ * Armadilha & Prevenção: "Descolamento" da sombra do carro em dunas íngremes por divergência de precisão entre o vértice deslocado na luz vs câmera. Prevenção: Usar o mesmo fator exato de LOD/anel ou forçar resolução máxima da cascata toroidal no pass de profundidade de perto, além de ajustar dinamicamente o shadow bias por cascata.
+Marco 4: Atmosfera Física (@takram/three-atmosphere) + Sombras de Nuvens + GI Rebote de Areia
+ * Referências: takram-design-engineering/three-geospatial, Uncharted 4 / Horizon Sand GI.
+ * Arquivos/Passes: Substituir o skybox e AtmosphericIBL pelo pass atmosférico de Takram. Adicionar textura animada de nuvens globais no shader da luz solar e o cálculo de bounce quente + Bent Normals do GTAO nos shaders de terreno, rocha e veículo.
+ * Performance Estimada: ~0.8 ms – 1.2 ms (a maioria do custo está no sky-view LUT atualizada apenas quando o sol se move significativamente).
+ * Degradação Híbrido/Mobile: Desativar projeção de nuvens e usar IBL estática pré-computada no perfil Leve.
+ * Armadilha & Prevenção: Estouro de precisão half-float (RGBA16F) ao multiplicar o brilho intenso do sol atmosférico físico com o Bloom. Prevenção: Trabalhar rigorosamente no espaço linear HDR com exposure scaling calibrado antes do pass de AgX/ACES e restringir os valores de emissividade do céu no pipeline de IBL.
+Marco 5: Áudio Motor/Transmissão Waveguide em AudioWorklet + Gamepad FFB
+ * Referências: YigitSalihEmecen/Engine_Sim, Web Audio API AudioWorklet.
+ * Arquivos/Passes: Criar engine-synth.worklet.ts rodando na thread de áudio recebendo RPM, carga do acelerador, pressão do turbo e eventos de bloqueio de diferencial/batida de aro. Integrar GamepadHaptics.ts.
+ * Performance Estimada: < 0.1 ms na thread principal (processamento isolado na thread de áudio nativa do OS).
+ * Degradação Híbrido/Mobile: Reduzir o número de linhas de waveguide de 4 para 1 no perfil Leve para poupar bateria no mobile.
+ * Armadilha & Prevenção: Erros de carregamento de AudioWorklet em build de produção do Vite (caminhos quebrados ou CORS). Prevenção: Importar o worklet utilizando o sufixo ?worker&url (ou plugin dedicado de Vite para worklets) garantindo que o bundler embuta ou gere o chunk JS isolado corretamente.
+Marco 6: Rota Experimental PC Ultra — WebGPU + TSL & MLS-MPM Granular Local
+ * Referências: Three.js r187 WebGPURenderer + TSL, arquiteturas Taichi/MLS-MPM GPU.
+ * Arquivos/Passes: Implementar uma camada de abstração de shaders via TSL para que os materiais principais possam compilar tanto para GLSL (WebGL2) quanto para WGSL (WebGPU). Criar um volume local de 4m × 4m rastreando o veículo com Compute Shaders para simular areia granular 3D real em volta dos pneus.
+ * Performance Estimada: ~2.5 ms – 4.0 ms exclusivos em GPU dedicada (RTX 3060+ / RX 6600+) no modo WebGPU ativado.
+ * Degradação Híbrido/Mobile: Completamente desativado fora do modo experimental PC Ultra. O jogo roda perfeitamente com areia baseada na ToroidalCascade no modo padrão.
+ * Armadilha & Prevenção: Explosão numérica das partículas MPM quando o carro acelera bruscamente ou em colisões rápidas. Prevenção: Implementar clamping rigoroso de velocidade nas células da grade (P2G / G2P), passo de tempo adaptativo (CFL condition) dentro do compute pass e reciclar partículas que saem da caixa local de 4×4 metros de volta para o contato frontal do pneu.

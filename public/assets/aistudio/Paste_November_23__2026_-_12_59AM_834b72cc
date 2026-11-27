@@ -1,0 +1,2708 @@
+
+Conversa com o Gemini
+Você é um engenheiro gráfico sênior e especialista em física de veículos off-road / terramecânica em tempo real (WebGL2 / Three.js r187 / TypeScript).
+
+
+
+Estou evoluindo o **DuneFlow**, uma simulação 3D interativa de areia e lama deformáveis em tempo real que roda diretamente no navegador (desktop e celular a 60 fps). Quero que você **pense profundamente, pesquise na internet** (papers SIGGRAPH/Eurographics, palestras GDC, técnicas de *SnowRunner*, *BeamNG.drive*, *Journey*, *Uncharted 4*, *Forza Horizon*, *Project Chrono SCM*, *FluidNinja*, *EmberGen*) e me ajude a encontrar o próximo grande salto de **realismo de alto impacto**.
+
+
+
+---
+
+
+
+## 1. O QUE JÁ TEMOS IMPLEMENTADO E FUNCIONANDO HOJE
+
+
+
+### Terreno & Simulação Granular em GPU
+
+**Cascatas Toroidais Duplas em GPU** (`2 × 512²` / `1024²` `RGBA16F`, ping-pong, limpeza zero-copy, ~8 MB VRAM) codificando depressão, massa deslocada (*berm*), compactação e *microImprint*.
+**Clipmap Adaptativo em 1 único Draw Call** (8 anéis concêntricos com CDLOD morphing, ~51k triângulos, zero reconstrução de malha na CPU).
+**Relaxamento de Avalanche a 33° + Vento & Auto-Sleep** (`SleepController` que derruba o custo de simulação GPU para `0.00 ms` quando parado).
+**BrushEncoder compacto em GPU** (até 64 pincéis simultâneos por frame em `FloatType DataTexture`) com cápsulas varridas alinhadas à corda física de entrada do pneu (`sqrt(2*R*z - z^2)`).
+**Dois Biomas completos:**
+**Deserto:** BRDF difuso OpenPBR Energy-Preserving Oren-Nayar (EON), texturas fotográficas anti-tiling com normais RNM em 5 camadas, ripples eólicos band-limited (sem moiré), glints de quartzo filtrados por derivada (*Deliot & Belcour*), auto-sombra por *horizon march* de 6 taps.
+**Lama & Grama:** lama viscosa úmida com GGX, poças de água reflexivas com nuvens/horizonte e sistema de grama 3D instanciada que dobra com o vento e achata sob o carro/trilhas.
+
+
+### Física de Veículo, Terramecânica & Dano
+
+**Terramecânica CPU sem GPU readback (`SandTerramechanics` / Bekker SCM):** calcula afundamento $z$, compactação residual em ring buffer de 256 segmentos, arrasto de compactação, força lateral de *bulldozing*, fator de tração e **Foot IK** (4 corredores com pegadas de 2–6 cm).
+**Tração & Pneus:** caixa de transferência `4H / 4L` (+48% torque em reduzida), pressão de pneus ajustável (`10–36 PSI`) alterando área de contato, afundamento e arrasto em tempo real, câmbio, drift/freio de mão e turbo boost.
+**Suspensão 4-rodas independente + Física de Impacto 6-DOF:** compressão/droop individual sobre pedras escaláveis e costelas de areia, capotamento real, deformação de vértices na lataria (*mesh crush*), vidro rachado em níveis, faróis quebráveis e peças destacáveis (capô, para-choque, carga).
+
+
+### Iluminação Quase-RT, Reflexos, Partículas & UX
+
+**Pipeline Linear HDR + Pós-processamento:** `AtmosphericIBL` (céu Rayleigh/Mie pré-convoluído em PMREM), `GTAOPass` reaproveitando `depthTexture` em meia resolução + *Jimenez 2016 Multi-Bounce Colored AO*, *Screen-Space Contact Shadows* com IGN dithering, Bloom seletivo de alto limiar, Tone Mapping **AgX / ACES** e FXAA leve.
+**Reflexos Reais no Veículo:** `CubeCamera` dinâmico *time-sliced* (1 face/frame no modo Híbrido 128², 2 faces/frame no Ultra 256², PMREM fora do passe principal) com *Parallax-Corrected Cubemap (PCC)*, pintura automotiva 4 camadas com clearcoat/flop/micro-flakes/patina de poeira, vidro óptico e **retrovisores laterais + interno funcionais em tempo real** com culling e intercalação.
+**Partículas & Áudio:** 4.096 grãos balísticos de *roost* em GPU, 512 faíscas de impacto, sistema de fumaça/poeira volumétrica instanciada em 1 draw call com atlas Perlin-Worley pré-assado e áudio Web Audio procedural (motor, areia, lama, impactos).
+**Mobile & Desktop:** controles táteis multi-touch blindados para retrato e paisagem (incluindo atalhos 4H/4L e PSI), câmeras Chase / Capô / GoPro Roda / Órbita / Close-up e excelente desempenho em celulares.
+
+
+---
+
+
+
+## 2. O QUE JÁ MAPEAMOS NO NOSSO ROADMAP (AINDA NÃO IMPLEMENTADO)
+
+
+
+**Fase 1 (Visibilidade SCM & Poeira Física):** Widget compacto *Physics Monitor* (slip angle, slip ratio, resistência ao cisalhamento, afundamento); toggle *Tire Track* com splines 3D não-persistentes codificando deslocamento/PSI/cisalhamento; partículas GPU de poeira disparadas acima de limiar de `slipRatio` moduladas pela resistência ao cisalhamento do solo.
+**Fase 2 (Fluido 2D & Atmosfera Volumétrica):** Solver toroidal Navier-Stokes / *Stable Fluids* 2D em GPU na esteira do carro (vórtices de von Kármán); shading *6-way lightmap* + *soft depth-fade* + cones volumétricos dos faróis na poeira; sujeira direcional por fluxo de ar (*wake dust clinging*).
+**Fase 3 (Geomecânica Avançada):** Estampa real dos cravos do pneu (*tread-stamped micro-relief*); zonas heterogêneas de solo (*Fesh-Fesh*, crosta salina quebradiça, areia úmida); avalanches ativas em encostas + *Singing Sand*; liquefação tixotrópica / areia movediça; *sand streamers* + botão *Time-Lapse Eólico*.
+**Fase 4 (Interações & Sandbox):** Pranchas de desatolagem funcionais (*Maxtrax*); guincho com cabo catenário e âncora de areia (*deadman anchor*); peças soltas/pedras deformando a areia via `BrushEncoder`; chuva localizada enchendo os próprios sulcos + ondas 2D (*Shallow Water*); tempestade elétrica com fulguritos + *heat haze*; anel de choque em aterrissagens.
+**Fase 5 (Ferramentas Científicas & Micro-Realismo):** Scanner geotécnico subterrâneo (isóbaras de Boussinesq + cunha de Coulomb); lupa diagnóstica GPU arrastável; fantasma comparativo de setup (`36 PSI` vs `12 PSI`); deformação física da parede lateral do pneu (*dynamic sidewall bulge*); cascata GPU de macro-grãos na câmera GoPro; *tire caking*, respingos na lente e áudio granular SCM.
+
+
+---
+
+
+
+## 3. FILTRO RIGOROSO — O QUE EU QUERO (E O QUE EU NÃO QUERO)
+
+
+
+**NÃO quero realismo “bobo” ou gimmick caro:**
+
+Nada de micro-detalhes que o jogador quase nunca nota, mas que custam 3 ms de GPU ou centenas de linhas de manutenção frágil (ex.: simular grãos individuais invisíveis longe da câmera, raios puramente decorativos, efeitos exagerados de cinema que sujam a imagem ou derrubam o FPS no celular).
+
+
+**QUERO realismo que realmente transforma a percepção de peso, matéria, luz e resposta física:**
+
+Aquele tipo de detalhe que faz o cérebro instantaneamente acreditar que **“essa areia tem massa, esse pneu tem borracha e ar dentro, essa suspensão pesa 2 toneladas e essa luz é real”**.
+Tudo deve respeitar orçamento rigoroso para **WebGL2 / Three.js r187 rodando liso em desktop E celular (60 fps no modo Híbrido)**, sem GPU readbacks e preferencialmente aproveitando buffers que já temos (`ToroidalCascade`, `depthTexture`, `BrushEncoder`, `SandTerramechanics`, `PostProcessingPipeline`).
+
+
+---
+
+
+
+## 4. SUA MISSÃO (PENSE MUITO E PESQUISE FUNDO)
+
+
+
+**Auditoria Crítica do Roadmap Atual (Corte sem dó):**
+Classifique os itens do nosso roadmap em:
+**A) Ouro puro (alto impacto real / baixo ou médio custo — fazer primeiro)**
+**B) Bom, mas precisa simplificação técnica inteligente para valer a pena**
+**C) Realismo bobo / baixo retorno pelo custo (cortar ou adiar)**
+Justifique cada classificação com base em percepção visual/tátil e custo real de GPU/CPU.
+
+
+2. **Pesquisa & Novas Ideias Fora do Óbvio (que ainda NÃO estão no roadmap):**
+
+Pesquise na internet técnicas modernas usadas em jogos AAA, simuladores off-road e papers gráficos (2020–2026) sobre:
+Interação pneu ↔ areia/lama (física, contato visual, deformação de solo e borracha);
+Iluminação granular/atmosférica realista sem ray tracing pesado (subsurface scattering em cristas de dunas, micro-oclusão de sulcos, aerial perspective, sombras de poeira);
+Percepção cinestésica de peso/terreno (câmera física, inércia de chassi/carga, feedback sonoro e tátil que “vendem” o peso real da picape na areia);
+Bibliotecas open-source leves ou algoritmos replicáveis em WebGL2/GLSL3 que entreguem salto desproporcional de realismo.
+Traga **8 a 12 ideias novas realmente brilhantes**, explicando claramente **o que muda na tela/direção** e **por que vale o esforço**.
+
+
+3. **Plano Técnico Acionável das Top 5 Prioridades Absolutas:**
+
+Escolha as **5 melhorias de maior relação Realismo / Custo** (combinando o melhor do roadmap + suas descobertas novas) e detalhe para cada uma:
+A matemática / algoritmo / paper de referência;
+Quais shaders, texturas ou passes exatos da arquitetura atual ela toca;
+Estimativa realista de custo em ms (Desktop e Mobile) e estratégia de degradação no modo `Leve` / `Híbrido` / `Ultra`;
+Os principais riscos/armadilhas de implementação em WebGL2 / Three.js r187 e como evitá-los.
+Aqui está um plano de pesquisa para este tema. Se precisar mudar alguma coisa, me avise!
+
+ Realismo Avançado no DuneFlow 
+Pesquisar sites
+(1) Mapear o orçamento real de desempenho e restrições técnicas de WebGL2 e Three.js r187 em Desktop e Mobile (60 fps no perfil Híbrido), analisando gargalos de GPUs mobile TBDR (Adreno, Mali, Apple GPU), largura de banda de render targets RGBA16F, limitações de filtragem e precisão half-float sem compute shaders, overhead de passes adicionais sobre o depthTexture e limites práticos de ALU, texture units e draw calls.
+(2) Auditar criticamente o impacto perceptual versus custo computacional e complexidade de manutenção de cada item das cinco fases do roadmap atual do DuneFlow, identificando alternativas de simplificação inteligente usadas em produção:
+(a) Fase 1 e Fase 2: widget Physics Monitor, splines 3D de rastro, poeira GPU orientada a slipRatio e cisalhamento, solver toroidal 2D Navier-Stokes/Stable Fluids na esteira, shading 6-way lightmap, soft depth-fade, cones volumétricos de faróis e sujeira direcional por fluxo de ar;
+(b) Fase 3: micro-relevo estampado dos cravos do pneu, zonas heterogêneas de solo (Fesh-Fesh, crosta salina quebradiça, areia úmida), avalanches ativas em encostas com Singing Sand, liquefação tixotrópica, sand streamers e time-lapse eólico;
+(c) Fase 4 e Fase 5: pranchas Maxtrax, guincho catenário com âncora de areia, detritos/pedras deformando a areia via BrushEncoder, chuva localizada em sulcos com Shallow Water 2D, tempestade elétrica com fulguritos, heat haze, anel de choque, scanner geotécnico Boussinesq/Coulomb, lupa diagnóstica GPU, fantasma comparativo de PSI, deformação da parede lateral do pneu, macro-grãos na câmera GoPro, tire caking, respingos na lente e áudio granular SCM.
+(3) Pesquisar técnicas estado da arte (2020–2026) de interação pneu-solo e terramecânica em tempo real em papers SIGGRAPH/Eurographics, palestras GDC e referências como SnowRunner, Expeditions, BeamNG.drive, Forza Horizon 5, Uncharted 4 e Project Chrono SCM:
+(a) aterramento visual e deformação pneu-borracha (achatamento analítico e bojo de flanco em vertex shader dependente de carga/PSI, oclusão de contato pneu-areia, aderência e arremesso dinâmico de lama/areia nos cravos);
+(b) dinâmica de solo sem GPU readback que amplie a sensação de massa e resistência (acúmulo frontal em onda de bulldozing à frente do pneu, desmoronamento assimétrico de bordas de sulco, aprisionamento direcional em trilhos com torque de retorno no volante, compactação multipasse e gradientes de coesão/umidade).
+(4) Investigar técnicas de iluminação granular, micro-superfície e atmosfera de alto impacto sem ray tracing pesado (2020–2026), baseadas em Journey, Forza Horizon, Uncharted 4 e literatura gráfica recente compatíveis com buffers de altura e profundidade em WebGL2:
+(a) espalhamento subsuperficial (SSS) aproximado e iluminação de borda/crista dependente do ângulo de visão em dunas contraluz e véus de areia;
+(b) micro-oclusão de sulcos, normais inclinadas (bent normals) ou micro-sombras analíticas derivadas do heightmap, escurecimento por porosidade e gradiente de umidade capilar ao expor camadas inferiores do terreno;
+(c) perspectiva aérea econômica, projeção barata de sombras da nuvem de poeira no terreno e transições fisicamente plausíveis de brilho fino em lama úmida versus crosta seca.
+(5) Investigar técnicas de percepção cinestésica de peso, dinâmica secundária de veículos e áudio procedural em simuladores off-road (BeamNG.drive, SnowRunner, jogos de rally) e palestras GDC para comunicar o peso de duas toneladas sobre terreno deformável:
+(a) física de câmera (sistema massa-mola-amortecedor, estabilização seletiva de horizonte, transmissão filtrada de irregularidades de sulcos e resposta de FOV/inércia sob tração e frenagem);
+(b) dinâmica secundária de massa e chassi (torção de chassi e reação de torque da transmissão em reduzida 4L, inércia de carga/antena/para-barros, harmônicos de rebote de pneu com baixa pressão e resistência de esterçamento nos sulcos);
+(c) síntese granular e física em Web Audio API acoplada às variáveis da terramecânica (cisalhamento de areia seca vs. sucção viscosa de lama, rangidos estruturais, batidas de fim de curso e feedback háptico sutil em mobile).
+(6) Mapear algoritmos replicáveis em GLSL ES 3.00 / TypeScript e bibliotecas open-source leves compatíveis com Three.js r187 e WebGL2 (sem dependência de WebGPU), incluindo aproximações leves de campos de fluxo ou advecção inspiradas em FluidNinja/EmberGen, shaders de heightmap/deformação de pneus e síntese de áudio procedural, avaliando impacto em bundle, VRAM e compatibilidade mobile.
+(7) Consolidar os achados para selecionar as 5 prioridades absolutas de maior razão Realismo/Custo e estruturar a especificação arquitetural de cada uma sobre o pipeline atual do DuneFlow:
+(a) formulação matemática, algoritmo e referências bibliográficas ou técnicas;
+(b) pontos exatos de integração nos buffers e passes existentes (canais RGBA16F da ToroidalCascade, BrushEncoder, Clipmap, SandTerramechanics, depthTexture, GTAOPass, AtmosphericIBL, PostProcessingPipeline e Web Audio);
+(c) estimativa realista de custo em milissegundos em Desktop e Mobile com plano de degradação para os modos Leve, Híbrido e Ultra;
+(d) riscos e armadilhas críticas de implementação em WebGL2 e Three.js r187 (precisão half-float, loops de feedback em ping-pong, wrapping toroidal, conflitos de leitura/escrita no depthTexture, limite de texture units e gargalos de compilação/ALU em mobile) junto às respectivas estratégias de mitigação.
+Analisar os resultados
+Criar relatório
+Só mais uns minutinhos
+Iniciar pesquisa
+
+I've completed your research. Feel free to ask me follow-up questions or request changes.
+
+Realismo Avançado no DuneFlow
+23 de nov., 00:55
+
+
+
+
+O Gemini é uma IA e pode cometer erros.
+
+Realismo Avançado no DuneFlow
+Arquitetura do Próximo Salto de Realismo no DuneFlow: Auditoria do Roadmap, Técnicas AAA e Plano Técnico WebGL2
+O próximo salto perceptivo do DuneFlow não virá da adição de novos sistemas isolados, mas do fechamento de quatro lacunas sensoriais que hoje impedem o cérebro de acreditar plenamente no peso de 2 toneladas da picape sobre areia e lama: pneus visualmente rígidos apesar da calibração funcional de 10–36 PSI, ausência de oclusão analítica de contato e escurecimento poroso subsuperficial no encontro borracha–solo, desconexão cinestésica entre patinagem e resposta mecânica/sonora (escavação por slip-sinkage, confinamento nas paredes do sulco, câmera inercial e áudio granular físico) e plumas de poeira que ainda não reagem tridimensionalmente à luz solar nem projetam sombra sobre as dunas. A auditoria rigorosa dos 26 itens mapeados no roadmap atual recomenda promover 8 itens como prioridade imediata (Classe A), simplificar radicalmente 10 itens que representam armadilhas de banda DRAM ou complexidade em GPUs móveis TBDR — como Navier-Stokes 2D e Shallow Water explícito (Classe B) — e cortar ou adiar 8 itens de baixo retorno perceptivo (Classe C).
+
+O plano acionável das Top 5 prioridades — unindo o núcleo mais valioso do roadmap a técnicas consolidadas de produções AAA e literatura gráfica/terramecânica recente — foi dimensionado para manter 60 fps em desktop e celular (modo Híbrido) no WebGL2 / Three.js r187, com zero GPU readbacks e zero samplers extras no fragment shader do terreno (que já opera próximo ao mínimo garantido de 16 unidades de textura por estágio no WebGL2 mobile). Como não há benchmark independente publicado para esta pilha exata em WebGL2, o orçamento de tempo de quadro foi modelado analiticamente a partir da contagem de vértices, instruções ALU e largura de banda de memória, projetando um acréscimo bruto combinado de ~0,48 ms em desktop intermediário e ~1,54 ms em mobile Híbrido (9,2% do orçamento de 16,67 ms a 60 fps) — estimativas que devem ser validadas via profiling em hardware-alvo ARM Mali e Qualcomm Adreno.   
+
+1. Auditoria Crítica do Roadmap Atual
+Avaliar cada funcionalidade do roadmap sob o critério conjunto de psicofísica da percepção de massa/luz e arquitetura de GPUs móveis Tile-Based Deferred Rendering (TBDR) expõe uma linha divisória objetiva. Em arquiteturas móveis (ARM Mali, Qualcomm Adreno, Apple GPU), o gargalo dominante raramente é aritmética pura em shaders, mas sim o tráfego de DRAM provocado por trocas sucessivas de Framebuffer Object (FBO), tile flushes e overdraw de transparências. Medições da Arm documentadas em análises de hardware TBDR mostram que uma única ação incorreta de carga de anexo pode desperdiçar cerca de 600 MiB/s de largura de banda de leitura e pressionar rapidamente o limite térmico do aparelho.   
+
+
+Esses valores (modelados de forma conservadora considerando apenas 1 leitura + 1 escrita de RGBA16F por passe, quando passes de advecção e divergência leem múltiplos alvos) estabelecem uma regra estrutural para o DuneFlow: nenhuma simulação iterativa extra em grade 2D deve entrar na GPU quando existir uma aproximação analítica ou acoplada aos buffers já pagos. Além do custo de banda, o armazenamento em RGBA16F (IEEE-754 half-float com 10 bits de mantissa) impõe um limite físico de precisão que afeta diretamente a acumulação de água e a erosão: enquanto em valores em torno de 0,10 o menor passo representável (ULP) é 0,000061 (com delta mínimo alterável de 0,000031), na faixa de 50,0 o ULP sobe para 0,03125 (3,125 cm), fazendo qualquer incremento inferior a 1,56 cm arredondar silenciosamente para zero. Assim, qualquer altura de água ou erosão persistente precisa operar em deltas relativos de pequena amplitude, nunca sobre a cota absoluta do terreno.   
+
+A tabela abaixo classifica todos os 26 itens das Fases 1 a 5 do roadmap atual em A (Ouro puro), B (Bom, mas exige simplificação técnica inteligente) e C (Realismo bobo / cortar ou adiar), justificando cada veredito pela percepção visual/tátil e pelo custo real de GPU/CPU.
+
+Fase	Item do Roadmap Atual	Nota	Veredito Técnico: Percepção vs. Custo GPU/CPU
+F5	Deformação da parede lateral do pneu (sidewall bulge)	A	
+Maior retorno do roadmap. Hoje mudar 10–36 PSI é invisível na borracha; deformar ~12k vértices em espaço local do cubo custa <0,06 ms estimados no mobile e vende peso e ar imediatamente.
+
+F2	Shading 6-way lightmap + soft depth-fade na poeira	A	
+Remove o aspecto de billboard plano e recortes rígidos no terreno com apenas 1 atlas adicional no shader de partículas, sem tocar a cota de samplers do terreno.
+
+F1	Partículas GPU de poeira por slipRatio e cisalhamento	A	
+Liga causa (cisalhamento na curva de Janosi-Hanamoto) e resposta visual no emissor instanciado já existente, com custo marginal próximo de zero.
+
+F5	Áudio granular SCM	A	
+Síntese física estocástica PhISEM em AudioWorklet roda fora da main thread (0,00 ms GPU) e entrega metade da leitura tátil de areia seca vs. sucção de lama.
+
+F4	Peças soltas/pedras deformando areia via BrushEncoder	A	Aproveita slots ociosos dos 64 pincéis já alocados na DataTexture do BrushEncoder (<0,03 ms estimados), unificando física de dano e massa granular.
+F3	Zonas heterogêneas (Fesh-Fesh, crosta salina, areia úmida)	A	Com campo procedural determinístico idêntico em CPU e GPU (zero samplers extras), cria variedade real de tração que dá propósito tático a 4L e à calibração de PSI.
+F5	Tire caking (lama/areia aderida e solta por centrífuga)	A	
+Uma máscara de cavidade dos cravos + 1 escalar CPU por roda vendem viscosidade de lama e limpeza centrífuga ao acelerar, sem draw calls extras.
+
+F4	Anel de choque granular em aterrissagens	A	4–8 pincéis radiais transitórios no BrushEncoder + rajada no emissor de roost no pico de compressão 
+F
+z
+F 
+z
+​
+ ; alto impacto visceral por <0,02 ms.
+F2	Solver Navier-Stokes / Stable Fluids 2D na esteira	B	
+Simplificar radicalmente. 24 passes FBO consomem 24–96 MB/frame no mobile. Trocar por dipolo + vórtices de von Kármán analíticos + 2D Curl Noise nas partículas (0 FBOs extras).
+
+F3	Estampa real dos cravos (tread-stamped micro-relief)	B	Em 512² cobrindo 32 m, dx = 6,25 cm não resolve cravos de 2 cm sem aliasing. Trocar por estampa procedural de normal/micro-AO orientada ao rolamento no canal microImprint existente, borrada quando slipRatio > 0,35.
+F4	Chuva enchendo sulcos + ondas 2D (Shallow Water)	B	
+Shallow Water explícito exige 6 substeps a 60 fps (11 a 30 fps) na cascata de 32 m — ou 3–6 na de 64 m — a 12 m/s. Simplificar acumulando poças sobre a depression existente + anéis analíticos de onda ou grade separada 128² RG16F só de perturbação relativa.
+
+F2	Sujeira direcional por fluxo de ar (wake dust clinging)	B	Dispensar solver de fluido: usar máscara analítica no espaço local da lataria (mais acúmulo na traseira e caixas de roda, menos no capô varrido) integrada por 1 escalar CPU na pintura 4 camadas.
+F3	Avalanches ativas em encostas + Singing Sand	B	
+Evitar GPU readback: detectar na CPU travessia em encostas acima de 30° sob alto cisalhamento e disparar ressonador Web Audio (70–105 Hz + harmônico 2×) e emissor local descendo o gradiente.
+
+F4	Pranchas de desatolagem (Maxtrax)	B	Excelente mecânica off-road; implementar como 2 volumes OBB leves que sobrepõem localmente os parâmetros Bekker (alto 
+k
+ϕ
+k 
+ϕ
+​
+ , alto 
+c
+c) em SandTerramechanics sem flexão elástica complexa.
+F4	Guincho com cabo catenário e deadman anchor	B	
+Evitar simulação de corda colidindo/enrolando em obstáculos (problema complexo documentado pela Naughty Dog em Uncharted 4). Usar força elástica unilateral na CPU + curva catenária visual (cosh) tensionada pela carga.
+
+F2	Cones volumétricos dos faróis na poeira	B	Nunca usar raymarching fullscreen no mobile. Substituir por 2 cones geométricos Fresnel-faded com depth-fade e ruído scrollado (~0,05 ms), ativos apenas à noite ou sob poeira densa.
+F1	Widget compacto Physics Monitor	B	Útil para diagnóstico, mas deve vir oculto por padrão e redesenhar em Canvas 2D a 15–20 Hz para evitar layout thrashing no DOM.
+F5	Fantasma comparativo (36 PSI vs 12 PSI)	B	Não duplicar a simulação física: gravar um ring buffer leve de poses (~100 bytes/frame) e renderizar o ghost em modo Fresnel translúcido apenas para comparação didática.
+F5	Cascata GPU de macro-grãos na câmera GoPro	C	
+Cortar. Visível em uma única câmera, cria aliasing contra FXAA e é redundante frente aos glints Deliot & Belcour e aos 4.096 grãos balísticos já implementados.
+
+F4	Tempestade elétrica com fulguritos + heat haze	C	Cortar. Fulguritos são decorativos e desconexos da física veicular; heat haze full-screen adiciona passe dependente no PostProcessingPipeline, embaça a nitidez e prejudica leitura em telas pequenas.
+F5	Respingos na lente (lens droplets)	C	Cortar. Artifício cinematográfico que suja a imagem, particularmente nocivo no mobile onde os controles multi-touch já disputam área útil.
+F5	Lupa diagnóstica GPU arrastável	C	Cortar. Custo de manutenção de passe/viewport extra para um recurso pontual já atendido pelas câmeras Órbita e Close-up.
+F5	Scanner geotécnico subterrâneo (Boussinesq/Coulomb)	C	Adiar indefinidamente. Interessante para palestra técnica, mas irrelevante durante a pilotagem e caro em transparência/volumes abaixo da superfície.
+F1	Toggle Tire Track com splines 3D não-persistentes	C	Cortar. Linhas 3D coloridas flutuando na areia quebram a imersão; os próprios sulcos, o escurecimento poroso e o bojo do pneu comunicam PSI e cisalhamento de forma diegética.
+F3	Liquefação tixotrópica / areia movediça	C	
+Cortar e substituir. Areia seca de duna não apresenta tixotropia (fenômeno típico de fluidos/argilas coloidais cuja viscosidade cai sob cisalhamento prolongado). Substituir por slip-sinkage real.
+
+F3	Sand streamers + botão Time-Lapse Eólico	C	Cortar. Time-Lapse é truque de demonstração; sand streamers pedem geometria/partículas extras na crista com retorno inferior à translucidez rasante no próprio shader do terreno.
+  
+A conclusão operacional da auditoria é direta: eliminar os 8 itens da Classe C evita semanas de manutenção frágil e múltiplos passes extras sem sacrificar a credibilidade física, abrindo espaço de engenharia e de GPU para os sistemas ativos em 100% dos quadros.
+
+2. Pesquisa e Novas Ideias Fora do Óbvio (2020–2026)
+A síntese de técnicas de renderização em tempo real, palestras GDC/SIGGRAPH e motores off-road de referência (Spintires/MudRunner, SnowRunner, BeamNG.drive, Uncharted 4, Journey, Call of Duty: WWII, Project Chrono SCM e Google Filament) revela 10 ideias de alto impacto ainda ausentes do roadmap do DuneFlow. Cada uma ataca diretamente sinais visuais, mecânicos ou acústicos que o cérebro utiliza para validar peso, borracha, solo e luz.
+
+Interação Pneu ↔ Areia/Lama
+1. Acoplamento Terramecânico de Slip-Sinkage, Histerese Elasto-Plástica e Captura de Parede de Sulco (Rut-Wall Trapping)
+
+O que muda na tela e na direção: Patinar em excesso (slipRatio > 0,4) deixa de ser inofensivo e passa a escavar ativamente o terreno sob a roda (slip-sinkage, Lyasko 2010; Ding et al. 2010), aprofundando o sulco para 2–3× o afundamento estático (estudos experimentais em rodas com garras rígidas registram até 3–7× em s = 0,6, enquanto limitar s < 0,4 contém a escavação). Ao cruzar trilhas já abertas, as paredes do sulco exercem força lateral restauradora e torque de esterçamento (rut-wall trapping, WTIM), puxando a picape para dentro do trilho prévio e exigindo mais ângulo de volante e momento para escalar a borda. Em paralelo, adicionar rigidez elástica de descarregamento 
+k
+e
+k 
+e
+​
+  (
+σ
+try
+=
+k
+e
+(
+s
+y
+−
+s
+p
+)
+σ 
+try
+​
+ =k 
+e
+​
+ (s 
+y
+​
+ −s 
+p
+​
+ ), padrão do Project Chrono SCM) elimina oscilações abruptas liga/desliga quando o veículo para ou balança dentro do sulco.   
+
+Por que vale o esforço: Como o DuneFlow já mantém um ring buffer CPU de 256 segmentos de compactação, toda essa camada custa <0,08 ms na CPU sem readbacks e evita o problema frequentemente criticado em títulos comerciais quando a deformação parece cosmética. Cabe uma ressalva de engenharia: literatura geotécnica aponta que formulações semiempíricas clássicas (Bekker/Lyasko) aproximam fenômenos plásticos com modelos elásticos simplificados e podem divergir em cargas de placa extremas; por isso os coeficientes 
+k
+s
+k 
+s
+​
+  e 
+k
+e
+k 
+e
+​
+  devem ser calibrados empiricamente por bioma no DuneFlow.   
+
+
+Os resultados da modelagem ilustram o salto tátil desse acoplamento: ao reduzir a pressão de 36 para 12 PSI, a corda de contato se alonga de 24,6 cm para ~36–38 cm, reduzindo o afundamento total em 18% (de 17,51 para 14,35 cm em s = 0,6) e cortando o arrasto de compactação em 34% (de 5.351 N para 3.525 N). O jogador deixa de acelerar no limite sem consequência e passa a gerir aceleração, reduzida 4L e pressão dos pneus de forma estratégica.   
+
+2. Onda de Proa Assimétrica (Bow-Wave Berm) e Perfil Bioma-Específico (V vs. U)
+
+O que muda na tela e na direção: Em vez de bermas simétricas idênticas dos dois lados do sulco, a roda empilha uma onda de proa assimétrica à frente da corda de entrada e deslocada para o lado externo da deriva (slip angle 
+β
+β). Na lama, aplica-se um leve arrasto direcional de UV (mud offset, técnica de Spintires/MudRunner que desloca a textura lateral e longitudinalmente ao redor das rodas) e um perfil transversal em U com paredes coesivas mais íngremes, em contraste nítido com o perfil em V da areia seca governado pelo ângulo de repouso de 33°.   
+
+Por que vale o esforço: Reaproveita apenas 4 slots livres dos 64 já existentes no BrushEncoder (~0,05 ms GPU) e o gradiente já calculado da ToroidalCascade, fazendo a massa granular parecer fisicamente empurrada pela roda em vez de "carimbada" verticalmente.   
+
+Iluminação Granular e Atmosférica Sem Ray Tracing Pesado
+3. Estratificação Subsuperficial e Escurecimento Poroso em 4 Fases (Lagarde + Uncharted 4)
+
+O que muda na tela: Quando o pneu rasga os primeiros centímetros de areia seca descolorida pelo sol, o fundo do sulco expõe material subsuperficial mais compacto e úmido — visivelmente mais escuro e mais saturado. Na física óptica documentada por Sébastien Lagarde (Water drop 3a/3b), a água nos poros aproxima o índice de refração (1,33) do dielétrico da areia (~1,5), reduzindo o desvio por Snell, aprofundando o espalhamento frontal e elevando a absorção interna não-linear. Combinado às 4 fases de umidade de Uncharted 4 (Naughty Dog, SIGGRAPH 2016), o terreno transita continuamente entre: (D) seco; (C) saturado poroso — escurece o albedo sem ganhar reflexo espelhado artificial; (B) filme de tensão superficial (shrink-wrap) suavizando a rugosidade; e (A) núcleo da poça acima de 98% de umidade com normal forçada perfeitamente para cima.   
+
+Por que vale o esforço: Custa zero samplers extras no terreno, pois usa diretamente depression e compaction da ToroidalCascade, multiplicando instantaneamente a legibilidade de profundidade das trilhas sob sol a pino.
+
+4. Oclusão Analítica de Contato Pneu–Chassi (Grounding AO) + Micro-Shadowing de Sulcos (Chan 2018)
+
+O que muda na tela: Elimina o "efeito carro flutuando" sob qualquer ângulo de câmera (inclusive retrovisores e CubeCamera). Técnicas screen-space como o GTAOPass são cegas para geometria atrás do pneu ou fora do viewport, enquanto shadow maps direcionais carecem de resolução para sombrear micro-cavidades de 10 cm. A oclusão analítica de primitivas (Iñigo Quílez) projeta 4 elipsoides/esferas (rodas) e 1 cápsula (chassi) diretamente sobre a areia num raio de 6 m (pulado por early branch no resto da tela), composta multiplicativamente (
+1
+−
+A
+a
+b
+=
+(
+1
+−
+A
+a
+)
+(
+1
+−
+A
+b
+)
+1−A 
+ab
+​
+ =(1−A 
+a
+​
+ )(1−A 
+b
+​
+ )). Somado a isso, o micro-shadowing de cavidade (Call of Duty: WWII, Chan 2018) e a oclusão especular de Lagarde (Google Filament) escurecem frestas nos sulcos no terminador solar e bloqueiam vazamento de brilho especular dentro das cavidades.   
+
+Por que vale o esforço: Usa 0 texturas extras (apenas uniforms de posição/raio e o Laplaciano dos taps de altura já amostrados na ToroidalCascade), ancorando visualmente o peso de 2 toneladas da picape no solo.
+
+5. Translucidez Rasante em Cristas (Barré-Brisebois) + Bent Normals no GTAOPass (Ultra)
+
+O que muda na tela: Cristas finas de dunas e lábios recém-erguidos de berms ganham um brilho translúcido âmbar quente quando vistos contra o sol — substituindo a aparência de "gesso opaco" pela maciez ótica de quartzo fino (princípio da translucidez rápida da Frostbite/GDC 2011 de Colin Barré-Brisebois e da leitura solar rasante de Journey). No modo Ultra, habilitar Bent Normals no GTAOPass existente (Jimenez et al. 2016, Eq. 20–21) inclina a amostragem do AtmosphericIBL para longe das paredes dos sulcos e do fundo do chassi, removendo reflexos indevidos em sombras profundas.   
+
+Por que vale o esforço: A convexidade positiva do mesmo Laplaciano de altura já calculado para o micro-shadowing serve de máscara de espessura fina (~10 instruções ALU, zero mapas extras), enquanto benchmarks do Intel XeGTAO indicam que Bent Normals acrescentam apenas ~25% ao custo do passe GTAO de meia resolução no Ultra.   
+
+6. Sombras Projetadas da Poeira no Solo (Low-Res Beer/Transmittance Shadow Map)
+
+O que muda na tela: Nuvens densas de areia ou Fesh-Fesh erguidas pelas rodas passam a projetar sombras suaves e semitransparentes sobre as dunas e sobre a traseira da picape, vendendo densidade volumétrica real sob sol forte.   
+
+Por que vale o esforço: Splatting do mesmo InstancedMesh de poeira num alvo ortográfico de 128×128 R8/RGBA8 (16 KB de VRAM) com blending aditivo de densidade óptica 
+τ
+τ, aplicado via transmitância de Beer (
+T
+=
+e
+−
+σ
+τ
+T=e 
+−στ
+ ) na reconstrução de profundidade do PostProcessingPipeline (técnica de Cloud Shadows de Wenzel), consome 0 samplers no terreno e apenas ~0,05–0,15 ms estimados.   
+
+Quando os seis mecanismos acima (Ideias 1 a 6) operam juntos no raio de 3 m ao redor de cada roda, forma-se uma cadeia físico-óptica fechada: o aro metálico rígido emoldura o achatamento e o bojo lateral da borracha a baixa pressão; a oclusão analítica sela a sombra sob a área de contato; a onda de proa assimétrica se empilha à frente enquanto a areia subsuperficial exposta atrás escurece por porosidade; a crista fina ganha translucidez quente contra o sol; e a pluma de poeira com iluminação 6-way projeta sombra suave sobre o rastro recém-aberto.
+
+7. Perspectiva Aérea Leve via Mip Fog (Uncharted 4) + Fase Mie (e Hillaire 2020 no Ultra)
+
+O que muda na tela: Dunas distantes deixam de fundir-se numa neblina plana e adquirem profundidade atmosférica coerente com a elevação do sol e a cor real do céu em cada direção do horizonte.
+
+Por que vale o esforço: Embora o pipeline de LUTs de Sébastien Hillaire (EGSR/SIGGRAPH 2020: Transmittance 256×64, Multi-Scattering 32×32, Sky-View 192×108 e Aerial Perspective 32×32×32) seja a referência de precisão, implementações WebGL2 sem compute shaders precisam gerar fatias em múltiplos FBOs ou reconstruir uma LUT 2D a cada movimento da câmera, com risco de banding. No modo Híbrido (desktop e mobile), adotar o Mip Fog de Uncharted 4 — amostrando o próprio PMREM do AtmosphericIBL já existente (mips borrados perto da câmera, mips nítidos no horizonte) mais um termo analítico de fase Mie — custa apenas 1 fetch no PostProcessingPipeline e zero LUTs extras. No Ultra Desktop, o pacote open-source @takram/three-atmosphere (compatível com WebGL2 e postprocessing) pode fornecer perspectiva aérea física completa caso se busque precisão atmosférica total.   
+
+Percepção Cinestésica de Peso, Inércia e Terreno
+8. Câmera Física Massa-Mola-Amortecedor de 2ª Ordem + Horizon Roll-Blend
+
+O que muda na tela e na direção: Ao engatar 4L e arrancar, o chassi avança levemente à frente do enquadramento; ao frear forte na areia profunda, a câmera mergulha com inércia; ao cruzar costelas de areia, manter o horizonte 70–80% estabilizado (inspirado nos modos Lock Roll/Pitch to Horizon adicionados ao BeamNG.drive v0.38) faz o jogador enxergar claramente o trabalho angular da suspensão sob a carroceria, em vez de girar a tela inteira junto com o carro. Micro-impulsos curtos nos fins de curso (bump-stops) comunicam impactos de 2 toneladas sem induzir enjoo.   
+
+Por que vale o esforço: Poucas dezenas de linhas de matemática massa-mola em TypeScript (<0,02 ms CPU, 0,00 ms GPU) entregam uma das maiores evoluções de "sensação de peso" reconhecidas por jogadores em simuladores off-road e de rali (DiRT 2, Forza, BeamNG).   
+
+9. Torque Reativo de Driveline (Chassis Twist), Mola Pneumática (Wheel-Hop) e Inércia Secundária
+
+O que muda na tela e na direção: Pisar fundo na reduzida 4L (+48% torque) inclina sutilmente o chassi em rolagem por reação do eixo cardã, dando sensação real de motor longitudinal sob carga. Acoplar a rigidez vertical pneumática 
+k
+z
+(
+PSI
+)
+k 
+z
+​
+ (PSI) em série com a suspensão altera a frequência natural de wheel-hop da massa não-suspensa de 12,5 Hz (36 PSI) para 7,9 Hz (10 PSI), tornando perceptível o "efeito colchão" de pneus murchos em costelas de areia. Complementarmente, 2–3 pêndulos leves amortecidos (antena flexível, para-barros traseiros ou carga na caçamba) tornam visíveis micro-acelerações de alta frequência que o chassi pesado filtra.   
+
+Por que vale o esforço: Custo de CPU irrisório (<0,02 ms) e acoplamento direto à deflexão 
+δ
+i
+δ 
+i
+​
+  do pneu da Prioridade 1.
+
+Ecossistema Open-Source e Alavancas do Three.js r187 / WebGL2
+10. Consolidação Uber-Composite TBDR + Recursos Nativos do Three.js r186/r187
+
+O que muda no pipeline e no FPS: Reduz drasticamente a banda DRAM no celular e eleva a nitidez de sombras e materiais secundários. O Three.js r186/r187 (setembro–outubro de 2026) incorporou o BRDF difuso EON nativamente em MeshPhysicalMaterial (r187, PRs #34351/#34379) — permitindo padronizar rochas, detritos e superfícies empoeiradas com a mesma resposta energética das dunas —, a abstração SunLight com cascatas de sombra (r186/r187, utilizável com WebGLRenderer) para manter sombras nítidas sob os pneus e suaves ao longe, e THREE.Timer para passo temporal consistente. Em paralelo, fundir os passes de pós-processamento num único passe uber-composite desenhado com triângulo fullscreen único (padrão do EffectPass de pmndrs/postprocessing, que evita trabalho redundante na diagonal de quads) e invocar gl.invalidateFramebuffer() em anexos transitórios logo após o último draw call (prática oficial Arm Mali / Android Developers) reduz substancialmente tiles e banda DRAM (medições da Arm em Mali registram cerca de 55% menos tiles e tráfego ao fundir passes). Por fim, three-mesh-bvh (MIT, WebGL2) acelera raycasts e shapecasts de pneus, peças soltas e futuras pranchas Maxtrax contra rochas escaláveis.   
+
+Por que vale o esforço: A economia TBDR obtida pela fusão de passes de pós-processamento ajuda a pagar o custo das novas melhorias no celular, protegendo a margem dos 60 fps.
+
+3. Plano Técnico Acionável das Top 5 Prioridades Absolutas
+As cinco prioridades abaixo combinam o maior ganho perceptivo de peso, borracha, matéria e luz por milissegundo investido. Elas foram arquitetadas como um conjunto integrado que reutiliza ToroidalCascade, BrushEncoder, depthTexture, SandTerramechanics, AtmosphericIBL e PostProcessingPipeline, sem readbacks e mantendo intacta a cota de samplers do fragment shader do terreno (estimada hoje em ~13 de 16 unidades mínimas garantidas no WebGL2 mobile).   
+
+
+Prioridade 1 — Deformação Analítica da Carcaça do Pneu (Soft-Tire WPO + Sidewall Bulge + Tire Caking)
+Matemática e Referências: Baseada em deformação de carcaça World Position Offset (WPO) em GPU para crawlers off-road e nas relações de rigidez vertical pneumática da terramecânica de Wong. A rigidez vertical efetiva do pneu soma a estrutura da lona à contribuição linear da pressão interna (10–36 PSI):   
+
+k
+z
+(
+PSI
+)
+=
+k
+carcass
++
+c
+p
+⋅
+PSI
+k 
+z
+​
+ (PSI)=k 
+carcass
+​
+ +c 
+p
+​
+ ⋅PSI
+Como referência ilustrativa para um pneu 33" (
+R
+0
+=
+0
+,
+415
+ m
+R 
+0
+​
+ =0,415 m, aro 
+R
+rim
+=
+0
+,
+216
+ m
+R 
+rim
+​
+ =0,216 m, altura de flanco 
+H
+=
+0
+,
+199
+ m
+H=0,199 m, massa de veículo ~2.100 kg), valores empíricos da ordem de 
+k
+carcass
+≈
+45
+ kN/m
+k 
+carcass
+​
+ ≈45 kN/m e 
+c
+p
+≈
+6
+,
+5
+ kN/(m
+⋅
+PSI)
+c 
+p
+​
+ ≈6,5 kN/(m⋅PSI) resultam em deflexão estática de 1,9 cm em 36 PSI e 4,7 cm em 10 PSI sob carga nominal de 5.200 N, atingindo até 10,5 cm sob compressão de 2,2G. A deflexão vertical 
+δ
+=
+clamp
+(
+F
+z
+/
+k
+z
+,
+ 
+0
+,
+ 
+0
+,
+65
+H
+)
+δ=clamp(F 
+z
+​
+ /k 
+z
+​
+ , 0, 0,65H) é aplicada no vertex shader no espaço local não-rotacionado da manga de eixo (hub-local), mantendo o achatamento fixo na base (
+y
+=
+−
+R
+0
++
+δ
+y=−R 
+0
+​
+ +δ) independentemente da rotação 
+θ
+spin
+θ 
+spin
+​
+  da roda:   
+
+Preservação do aro rígido: 
+m
+rim
+=
+smoothstep
+(
+R
+rim
++
+0
+,
+015
+,
+ 
+R
+rim
++
+0
+,
+065
+,
+ 
+r
+radial
+)
+m 
+rim
+​
+ =smoothstep(R 
+rim
+​
+ +0,015, R 
+rim
+​
+ +0,065, r 
+radial
+​
+ ) mantém o aro metálico perfeitamente circular.   
+
+Achatamento 
+C
+1
+C 
+1
+  da banda de rodagem: vértices abaixo do plano de contato 
+y
+c
+=
+−
+R
+0
++
+δ
+y 
+c
+​
+ =−R 
+0
+​
+ +δ (alinhado ao normal local do terreno) são projetados suavemente para 
+y
+c
+y 
+c
+​
+  via smooth-max, evitando quinas artificiais na entrada e saída da corda.
+
+Bojo lateral (sidewall bulge): expande a parede lateral ao longo do eixo 
+x
+hub
+x 
+hub
+​
+  segundo um perfil radial que atinge o máximo na metade do flanco (zero no aro e no centro da banda) multiplicado por um envelope angular focado na base (
+cos
+⁡
+p
+ϕ
+bottom
+cos 
+p
+ ϕ 
+bottom
+​
+ ), com expansão 
+Δ
+w
+≈
+0
+,
+55
+δ
+Δw≈0,55δ por lado (1,03 cm em 36 PSI contra 2,60–5,75 cm em 10 PSI).   
+
+Reorientação analítica da normal: inclina a normal de vértice pelo gradiente do bojo para que o reflexo especular da borracha e da lama úmida acompanhe a curvatura deformada.
+
+Integração na Arquitetura Atual: SandTerramechanics / suspensão calcula 
+δ
+i
+δ 
+i
+​
+  (filtrado contra oscilações de 1 frame) e envia 2 vec4 uniforms por roda ao material das 4 rodas (onBeforeCompile ou ShaderMaterial) e ao customDepthMaterial de sombras. Por rodar no vertex shader da própria malha, a deformação aparece automaticamente na câmera principal, no CubeCamera e nos retrovisores sem código adicional. No mesmo material de roda integra-se o tire caking (Classe A): uma máscara de cavidade entre os cravos modulada por uCakeLevel[4] (cresce com o afundamento em lama/areia úmida e decai proporcionalmente à aceleração centrífuga 
+ω
+2
+R
+0
+ω 
+2
+ R 
+0
+​
+  ao acelerar em terreno firme). Zero impacto na ToroidalCascade e zero draw calls extras.   
+
+Custo Estimado (modelagem analítica) e Degradação: Para ~3.000 vértices por roda (~12.000 vértices totais), o custo estimado é <0,01 ms em Desktop e ~0,04–0,08 ms em Mobile.   
+
+Leve: Achatamento + bojo simplificado sem recálculo de normal e sem customDepthMaterial deformado.
+
+Híbrido: Achatamento + sidewall bulge + recálculo analítico de normal + customDepthMaterial sincronizado + tire caking.
+
+Ultra: Adiciona torção tangencial da banda de rodagem (modelo brush) proporcional ao torque e ao slip angle 
+β
+β, nítida na câmera GoPro Roda.   
+
+Riscos e Armadilhas WebGL2 / Three.js r187:
+
+Achatamento girando junto com a roda: Nunca deformar vértices no espaço local de um Mesh que rotaciona via mesh.rotation.x. Manter mesh.rotation.x = 0 e aplicar a rotação de spin (uSpinAngle) dentro do vertex shader antes do achatamento no espaço da manga de eixo.
+
+Quantização mediump longe da origem no mobile: Relatos de produção em shaders de pneu mobile mostram a malha ficar "blocada" ao dirigir longe da origem mundial quando a deformação usa coordenadas de mundo em mediump. Executar 100% da matemática no espaço local da roda (±0,5 m) com highp float.   
+
+Sombra descolada da borracha: Sem replicar o deslocamento no customDepthMaterial, o shadow map projeta o pneu redondo abaixo da borracha achatada, criando uma fresta visível no contato.
+
+Prioridade 2 — Pacote Óptico de Contato e Matéria Granular (Zero Samplers Extras no Terreno)
+Matemática e Referências: Agrupa quatro efeitos físicos executados exclusivamente sobre os dados que o fragment shader do terreno já lê da ToroidalCascade (preservando margem abaixo do mínimo garantido de 16 samplers no WebGL2 mobile):   
+
+Escurecimento Poroso Subsuperficial e Umidade em 4 Fases (Lagarde DoWetProcess + Uncharted 4): A exposição subsuperficial 
+w
+exp
+=
+saturate
+(
+z
+/
+z
+ref
++
+0
+,
+6
+c
+p
+)
+w 
+exp
+​
+ =saturate(z/z 
+ref
+​
+ +0,6c 
+p
+​
+ ) deriva de depression (
+z
+z) e compaction (
+c
+p
+c 
+p
+​
+ ). Aplicando a atenuação porosa de Lagarde para dielétricos (porosity = 0,45 em areia seca, 0,75 em lama) e a transição de brilho (gloss = 1 - roughness) na Fase B:
+  
+
+factor
+=
+mix
+(
+1
+,
+0
+,
+ 
+0
+,
+2
+,
+ porosity
+)
+,
+C
+albedo
+′
+=
+C
+albedo
+⋅
+mix
+(
+1
+,
+0
+,
+ factor
+,
+ 
+w
+eff
+)
+factor=mix(1,0, 0,2, porosity),C 
+albedo
+′
+​
+ =C 
+albedo
+​
+ ⋅mix(1,0, factor, w 
+eff
+​
+ )
+gloss
+′
+=
+mix
+(
+1
+,
+0
+,
+ gloss
+,
+ mix
+(
+1
+,
+0
+,
+ factor
+,
+ 
+0
+,
+5
+w
+film
+)
+)
+gloss 
+′
+ =mix(1,0, gloss, mix(1,0, factor, 0,5w 
+film
+​
+ ))
+
+Na Fase C (w < 0,4), apenas o albedo escurece e ganha saturação (w_film = 0, preservando o aspecto fosco da areia revirada); na Fase B (0,4–0,95), o filme de tensão superficial eleva gloss'; na Fase A (>0,98 em poças), a normal é forçada para vec3(0,1,0) para reflexo perfeitamente plano.   
+
+Micro-Shadowing Direcional de Sulcos (Call of Duty: WWII, Chan 2018): Reutilizando os 4 taps vizinhos já lidos da ToroidalCascade para o cálculo da normal, a concavidade local (Laplaciano negativo) gera a visibilidade de cavidade 
+V
+∈
+[
+0
+,
+15
+;
+ 
+1
+,
+0
+]
+V∈[0,15; 1,0], convertida em abertura cônica e atenuação direcional da luz solar direta:
+  
+
+cos
+⁡
+θ
+=
+1
+−
+V
+,
+g
+′
+=
+clamp
+(
+1
+,
+5
+⋅
+gloss
+,
+ 
+0
+,
+ 
+1
+)
+,
+cos
+⁡
+θ
+′
+=
+max
+⁡
+(
+cos
+⁡
+θ
+(
+1
+−
+g
+′
+2
+)
+(
+N
+⋅
+V
+)
+4
+,
+ 
+0
+,
+001
+)
+cosθ= 
+1−V
+
+​
+ ,g 
+′
+ =clamp(1,5⋅gloss, 0, 1),cosθ 
+′
+ =max(cosθ(1−g 
+′
+  
+2
+ )(N⋅V) 
+4
+ , 0,001)
+microShadow
+=
+saturate
+(
+N
+⋅
+L
+cos
+⁡
+θ
+′
+)
+2
+microShadow=saturate( 
+cosθ 
+′
+ 
+N⋅L
+​
+ ) 
+2
+ 
+
+Para o termo especular indireto (IBL), aplica-se a oclusão especular de Lagarde conforme documentada no Google Filament:
+  
+
+specAO
+=
+clamp
+(
+(
+N
+⋅
+V
++
+V
+)
+exp
+⁡
+2
+(
+−
+16
+⋅
+roughness
+−
+1
+)
+−
+1
++
+V
+,
+ 
+0
+,
+ 
+1
+)
+specAO=clamp((N⋅V+V) 
+exp 
+2
+​
+ (−16⋅roughness−1)
+ −1+V, 0, 1)
+Oclusão Analítica de Contato Pneu–Chassi (Quílez + composição multiplicativa): Dentro de uma esfera de 6 m centrada na picape (early branch coerente que descarta >80% dos pixels de terreno), avalia-se a oclusão analítica de 4 esferas/elipsoides (rodas) e 1 cápsula (chassi), combinada por 
+V
+total
+=
+∏
+k
+(
+1
+−
+A
+k
+)
+V 
+total
+​
+ =∏ 
+k
+​
+ (1−A 
+k
+​
+ ) e aplicada somente à iluminação indireta (IBL), acompanhada de uma atenuação sutil de contato que fecha eventuais frestas de shadow bias.   
+
+Translucidez Rasante em Cristas (Barré-Brisebois & Bouchard, GDC 2011): A convexidade positiva do mesmo Laplaciano fornece a máscara de espessura fina 
+t
+crest
+t 
+crest
+​
+  (topos de dunas e berms). Com o vetor de luz invertido e distorcido pela normal 
+H
+lt
+=
+−
+(
+L
++
+N
+⋅
+d
+dist
+)
+H 
+lt
+​
+ =−(L+N⋅d 
+dist
+​
+ ):
+  
+
+I
+sss
+=
+pow
+(
+saturate
+(
+V
+⋅
+H
+lt
+)
+,
+ 
+p
+lt
+)
+⋅
+s
+lt
+⋅
+t
+crest
+I 
+sss
+​
+ =pow(saturate(V⋅H 
+lt
+​
+ ), p 
+lt
+​
+ )⋅s 
+lt
+​
+ ⋅t 
+crest
+​
+ 
+Somado como retro-espalhamento âmbar quente proporcional ao albedo da areia (desligado no bioma de lama).
+
+Integração na Arquitetura Atual: Modifica apenas o fragment shader do clipmap de terreno (Deserto e Lama) e adiciona 6 vec4 uniforms atualizados por frame (posições/raios das 4 rodas + volume do chassi). No modo Ultra, ativa saída de Bent Normals no GTAOPass existente (Jimenez 2016 Eq. 20–21) para direcionar a amostragem do AtmosphericIBL.   
+
+Custo Estimado (modelagem analítica) e Degradação: Desktop ~0,10–0,15 ms; Mobile Híbrido ~0,35–0,65 ms (~45–60 ops ALU extras médias em 60% da tela, 0 fetches novos).   
+
+Leve: Escurecimento poroso subsuperficial + AO analítica de contato (chassi + 4 rodas); sem micro-shadowing de curvatura nem SSS de crista.
+
+Híbrido: Todos os 4 efeitos ativos no terreno; GTAOPass sem Bent Normals.
+
+Ultra: Todos os 4 efeitos + Bent Normals no GTAOPass (+~25% sobre o custo do passe GTAO de meia resolução segundo dados do XeGTAO) + Mip Fog no pós-processamento.   
+
+Riscos e Armadilhas WebGL2 / Three.js r187:
+
+Dupla oclusão artificial sob o chassi: Multiplicar aoAnalytic diretamente pelo GTAOPass escurece excessivamente debaixo dos pneus. Combinar via min(aoGTAO, aoAnalytic) ou atenuar o GTAO dentro de 2,5 m do veículo, sem jamais multiplicar luz solar direta pela AO difusa.   
+
+Estouros de MAX_TEXTURE_IMAGE_UNITS: Em GPUs Adreno/Mali limitadas ao piso de 16 samplers no fragment shader, adicionar mapas extras de porosidade ou cavidade pode quebrar a compilação/linkagem do programa GLSL. Derivar tudo da ToroidalCascade elimina esse risco.   
+
+Degrau visual na costura das cascatas: Aplicar blend suave na zona de transição entre a cascata interna e externa ao derivar o Laplaciano de cavidade/crista.
+
+Prioridade 3 — Loop Terramecânico Completo: Slip-Sinkage, Captura de Sulco, Zonas Heterogêneas e Onda de Proa
+Matemática e Referências: Estende o modelo Bekker-Wong e Janosi-Hanamoto com slip-sinkage (Lyasko 2010; Ding et al. 2010), descarregamento elástico do Project Chrono SCM e confinamento lateral de parede de sulco WTIM:   
+
+Afundamento Estático + Slip-Sinkage + Arrasto de Compactação: Com 
+k
+eq
+=
+k
+c
+/
+b
++
+k
+ϕ
+k 
+eq
+​
+ =k 
+c
+​
+ /b+k 
+ϕ
+​
+  e raio substituto equivalente 
+R
+eq
+(
+PSI
+)
+R 
+eq
+​
+ (PSI) crescente à medida que o pneu achata:
+
+z
+0
+=
+(
+3
+W
+(
+3
+−
+n
+)
+b
+k
+eq
+2
+R
+eq
+)
+2
+2
+n
++
+1
+,
+z
+total
+=
+z
+0
+⋅
+(
+1
++
+k
+s
+∣
+s
+∣
+1
+,
+3
+)
+,
+R
+c
+=
+b
+k
+eq
+z
+total
+n
++
+1
+n
++
+1
+z 
+0
+​
+ =( 
+(3−n)bk 
+eq
+​
+  
+2R 
+eq
+​
+ 
+
+​
+ 
+3W
+​
+ ) 
+2n+1
+2
+​
+ 
+ ,z 
+total
+​
+ =z 
+0
+​
+ ⋅(1+k 
+s
+​
+ ∣s∣ 
+1,3
+ ),R 
+c
+​
+ =bk 
+eq
+​
+  
+n+1
+z 
+total
+n+1
+​
+ 
+​
+ 
+
+Em areia seca de duna (
+k
+c
+=
+990
+ N/m
+n
++
+1
+k 
+c
+​
+ =990 N/m 
+n+1
+ , 
+k
+ϕ
+=
+1
+,
+528
+×
+10
+6
+ N/m
+n
++
+2
+k 
+ϕ
+​
+ =1,528×10 
+6
+  N/m 
+n+2
+ , 
+n
+=
+1
+,
+1
+n=1,1, 
+k
+s
+=
+2
+,
+0
+k 
+s
+​
+ =2,0), essa formulação eleva o arrasto de compactação de 1.210 N (s = 0) para 5.351 N (s = 0,6) em 36 PSI (102,9% do peso na roda), contra 797 N a 3.525 N (67,8%) em 12 PSI.   
+
+Descarregamento Elástico Sem Tremor (Chrono SCM): Registrar a profundidade plástica acumulada 
+z
+p
+z 
+p
+​
+  e avaliar 
+σ
+try
+=
+k
+e
+(
+z
+−
+z
+p
+)
+σ 
+try
+​
+ =k 
+e
+​
+ (z−z 
+p
+​
+ ) no recarregamento/descarregamento, garantindo reação vertical contínua quando o veículo oscila ou estaciona no sulco.   
+
+Captura de Parede de Sulco (Rut-Wall Trapping): Percorrer o ring buffer CPU de 256 segmentos (ignorando os ~8 segmentos mais recentes da própria roda e aplicando filtro rápido de bounding box). Para distâncias laterais 
+d
+⊥
+∈
+[
+0
+,
+25
+b
+;
+ 
+1
+,
+2
+b
+]
+d 
+⊥
+​
+ ∈[0,25b; 1,2b] a um sulco prévio de profundidade 
+z
+rut
+z 
+rut
+​
+ , aplicar força lateral de bulldozing apontando ao eixo do sulco proporcional a 
+max
+⁡
+(
+0
+,
+ 
+z
+rut
+−
+0
+,
+03
+)
+⋅
+(
+1
+−
+∣
+sin
+⁡
+β
+∣
+)
+max(0, z 
+rut
+​
+ −0,03)⋅(1−∣sinβ∣), somada a um torque de resistência na direção.
+
+Zonas Heterogêneas Determinísticas (CPU = GPU): Um campo determinístico compartilhado modula os parâmetros Bekker e o albedo/rugosidade do terreno em 4 zonas: Areia de Duna padrão, Fesh-Fesh (baixo 
+k
+ϕ
+k 
+ϕ
+​
+ , alto 
+k
+s
+k 
+s
+​
+ , emissão de poeira 2,5× maior), Crosta Salina Quebradiça (alta rigidez até ultrapassar 
+p
+>
+p
+yield
+p>p 
+yield
+​
+ , rompendo bruscamente com estalo sonoro) e Areia Úmida de Baixada (maior coesão 
+c
+c, menor slip-sinkage, albedo mais escuro).
+
+Onda de Proa Assimétrica e Detritos no BrushEncoder: Emitir 4 pincéis assimétricos à frente da corda de entrada de cada pneu (deslocados pela velocidade e por 
+β
+β) + encaminhar peças destacáveis da lataria, pedras rolantes e o anel de impacto de aterrissagem (4–8 pincéis radiais) para os slots livres dos 64 pincéis da DataTexture existente.
+
+Integração na Arquitetura Atual: SandTerramechanics (TypeScript CPU), BrushEncoder (já alocado) e ~15 linhas de consulta de zona no fragment shader do terreno.
+
+Custo Estimado (modelagem analítica) e Degradação: CPU ~0,02–0,03 ms em Desktop e ~0,05–0,08 ms em Mobile; GPU ~0,05 ms pelos pincéis extras no BrushEncoder (como CPU e GPU executam em paralelo no pipeline de quadro, a contribuição líquida no caminho crítico é ~0,08 ms, ou ~0,13 ms sem sobreposição). Sem degradação entre Leve, Híbrido e Ultra: toda a física de solo deve permanecer idêntica e determinística em todos os presets.   
+
+Riscos e Armadilhas WebGL2 / Three.js r187:
+
+Singularidade do slipRatio em velocidade quase zero: Regularizar como 
+s
+=
+(
+ω
+r
+−
+v
+)
+/
+max
+⁡
+(
+∣
+ω
+r
+∣
+,
+ 
+∣
+v
+∣
+,
+ 
+0
+,
+3
+ m/s
+)
+s=(ωr−v)/max(∣ωr∣, ∣v∣, 0,3 m/s) para impedir picos espúrios ao arrancar.
+
+Divergência CPU vs. GPU nas zonas heterogêneas: Funções trigonométricas (sin/cos) divergem entre float64 do JavaScript e highp/mediump da GPU. Usar hash polinomial/inteiro ou interpolação bilinear sobre uma grade determinística 64×64 gerada uma vez na CPU garante que a crosta salina rompa exatamente onde aparece na tela.
+
+Stall de precisão RGBA16F: Manter a ToroidalCascade estritamente em deltas relativos (±1,5 m, ULP ≤0,001 m), evitando cotas globais elevadas onde o half-float ignora incrementos centimétricos.   
+
+Prioridade 4 — Poeira Volumétrica 6-Way Lightmap + Soft Depth-Fade + Sombra no Solo + Esteira Analítica
+Matemática e Referências: Substitui o solver Navier-Stokes 2D (24–96 MB/frame) pela combinação usada em jogos AAA (Battlefield, Unity 6-Way Smoke, Beer Shadow Maps e Cloud Shadows):   
+
+Esteira Aerodinâmica Analítica + 2D Curl Noise: Zero FBOs extras. A taxa de emissão no sistema instanciado já existente passa a ser modulada por max(0, slipRatio - 0.12) vezes o cisalhamento do solo (2,5× em Fesh-Fesh). Cada partícula é advectada por um campo analítico contínuo: vento ambiente + arrasto de dipolo traseiro do chassi + par de vórtices alternantes de von Kármán (
+f
+≈
+0
+,
+2
+v
+/
+W
+truck
+f≈0,2v/W 
+truck
+​
+ ) + 2D Curl Noise.   
+
+Shading 6-Way Lightmap (RTB + LBF): Troca o atlas Perlin-Worley por dois atlas pré-assados offline (Blender/Houdini/EmberGen em 512² ou 1024²): mapRTB (+X direita, +Y topo, +Z trás) e mapLBF (-X esquerda, -Y base, -Z frente), com opacidade no canal alfa. Projetando o vetor solar unitário 
+L
+L na base tangente rotacionada do billboard (L_local), aplica-se a ponderação direcional quadrática (cuja soma conserva energia unitária):
+  
+
+T
+sun
+=
+max
+⁡
+(
+L
+x
+,
+0
+)
+2
+RTB
+r
++
+max
+⁡
+(
+−
+L
+x
+,
+0
+)
+2
+LBF
+r
++
+max
+⁡
+(
+L
+y
+,
+0
+)
+2
+RTB
+g
++
+max
+⁡
+(
+−
+L
+y
+,
+0
+)
+2
+LBF
+g
++
+max
+⁡
+(
+L
+z
+,
+0
+)
+2
+RTB
+b
++
+max
+⁡
+(
+−
+L
+z
+,
+0
+)
+2
+LBF
+b
+T 
+sun
+​
+ =max(L 
+x
+​
+ ,0) 
+2
+ RTB 
+r
+​
+ +max(−L 
+x
+​
+ ,0) 
+2
+ LBF 
+r
+​
+ +max(L 
+y
+​
+ ,0) 
+2
+ RTB 
+g
+​
+ +max(−L 
+y
+​
+ ,0) 
+2
+ LBF 
+g
+​
+ +max(L 
+z
+​
+ ,0) 
+2
+ RTB 
+b
+​
+ +max(−L 
+z
+​
+ ,0) 
+2
+ LBF 
+b
+​
+ 
+A luz ambiente multiplica 
+RTB
+g
+RTB 
+g
+​
+  pelo céu zenital (AtmosphericIBL) e 
+LBF
+g
+LBF 
+g
+​
+  pelo rebote ocre da areia abaixo, somando um pico frontal de espalhamento Mie quando a poeira fica entre a câmera e o sol.
+
+Soft Depth-Fade: No fragment shader da poeira, fade = smoothstep(0.0, fadeDist, sceneLinearZ - fragLinearZ) suaviza interseções com dunas, pedras e lataria.
+
+Sombra Projetada da Poeira (Beer/Transmittance Map 128×128): Em um passe ortográfico dedicado (128×128 R8 ou RGBA8, 16 KB, alinhado ao sol cobrindo ~40 m ao redor do carro), desenha-se o mesmo InstancedMesh de poeira com additive blending acumulando densidade óptica 
+τ
+τ. No PostProcessingPipeline (que já lê depthTexture), projeta-se cada pixel opaco nesse mapa ortográfico e aplica-se 
+T
+shadow
+=
+exp
+⁡
+(
+−
+σ
+τ
+)
+T 
+shadow
+​
+ =exp(−στ) — zero samplers extras no terreno.   
+
+Integração na Arquitetura Atual: Atualiza o material e o emissor instanciado de poeira (1 draw call principal + 1 draw call 128×128 para sombra) e integra a leitura da sombra da poeira e o Mip Fog dentro do PostProcessingPipeline.
+
+Custo Estimado (modelagem analítica) e Degradação: Desktop ~0,25–0,40 ms; Mobile Híbrido ~0,70–1,10 ms.   
+
+Leve: 6-Way Lightmap + esteira analítica com limite de 96 partículas; sem depth-fade (evita cópia/leitura de depth) e sem mapa de sombra de poeira (~0,30 ms mobile).
+
+Híbrido: 6-Way + soft depth-fade em alvo de poeira de meia resolução + mapa de sombra 128×128 atualizado a 30 Hz (frames alternados) + limite de 160–192 partículas em polígonos octogonais recortados.
+
+Ultra: Até 384 partículas, sombra 256×256 a 60 Hz e cones geométricos de farol com Fresnel-fade à noite.
+
+Riscos e Armadilhas WebGL2 / Three.js r187:
+
+Feedback loop em depthTexture (GL_INVALID_OPERATION): Em WebGL2, ler a depthTexture vinculada ao GL_DRAW_FRAMEBUFFER ativo gera erro e frame preto mesmo com depthWrite = false. Como renderer.copyTextureToTexture() penaliza o desempenho dentro do loop de animação no Three.js, a solução limpa é renderizar opacos em rtOpaque (com depthTexture) e: (a) copiar o depth com gl.blitFramebuffer(..., gl.DEPTH_BUFFER_BIT, gl.NEAREST) direto entre FBOs, ou (b) melhor ainda para TBDR mobile, renderizar a poeira em um rtDust em meia resolução sem depth attachment, executando o descarte de profundidade e o soft depth-fade manualmente contra rtOpaque.depthTexture e compondo no PostProcessingPipeline — o que elimina o feedback loop e reduz em 4× o custo de overdraw da poeira.   
+
+Dependência de EXT_float_blend: Utilizar R8 ou RGBA8 (UnsignedByteType) no mapa de sombra 128×128 garante additive blending universal sem depender de EXT_float_blend (93,48% de suporte na telemetria web3dsurvey).   
+
+Overdraw de transparências no mobile: Controlar o tamanho máximo de tela dos billboards para manter no máximo 2–4 camadas sobrepostas e trocar quads quadrados por octógonos ajustados ao recorte alfa (reduzindo ~25–30% de pixels vazios).   
+
+Prioridade 5 — Pacote Cinestésico de Peso: Câmera Física, Driveline, Wheel-Hop e Áudio Granular PhISEM (AudioWorklet)
+Matemática e Referências: Une dinâmica de câmera massa-mola de 2ª ordem, dinâmica de driveline/chassi 4×4 e síntese física estocástica PhISEM (Physically-Inspired Stochastic Event Modeling, Perry Cook 1997 / 2014) em AudioWorklet:   
+
+Câmera Inercial 2ª Ordem + Horizon Roll-Blend: Para o vetor de atraso elástico 
+d
+c
+d 
+c
+​
+  no referencial do veículo:
+
+d
+¨
+c
+=
+ω
+n
+2
+(
+d
+alvo
+(
+v
+,
+β
+)
+−
+d
+c
+)
+−
+2
+ζ
+ω
+n
+d
+˙
+c
+d
+¨
+  
+c
+​
+ =ω 
+n
+2
+​
+ (d 
+alvo
+​
+ (v,β)−d 
+c
+​
+ )−2ζω 
+n
+​
+  
+d
+˙
+  
+c
+​
+ 
+Com 
+ω
+n
+,
+long
+≈
+6
+ rad/s
+ω 
+n,long
+​
+ ≈6 rad/s, 
+ζ
+long
+≈
+0
+,
+85
+ζ 
+long
+​
+ ≈0,85, roll da câmera travado em 75% ao horizonte mundial (caindo suavemente para 0% acima de 55° durante capotamentos), FOV pump contido (≤ +5° no turbo) e impulso vertical amortecido no fim de curso dos amortecedores.
+
+Torque Reativo de Driveline & Wheel-Hop Pneumático: Aplicar no corpo rígido o torque reativo longitudinal 
+τ
+roll
+=
+c
+drive
+⋅
+τ
+card
+a
+˜
+τ 
+roll
+​
+ =c 
+drive
+​
+ ⋅τ 
+card 
+a
+˜
+ 
+​
+  e integrar 4 estados verticais pneumáticos com rigidez 
+k
+z
+(
+PSI
+)
+k 
+z
+​
+ (PSI) (12,5 Hz @ 36 PSI vs. 7,9 Hz @ 10 PSI), alimentando diretamente o deslocamento 
+δ
+i
+δ 
+i
+​
+  da Prioridade 1.   
+
+Síntese Granular PhISEM em AudioWorklet: Executada em thread de áudio dedicada (48 kHz, blocos de 128 amostras = 2,67 ms), a rotina PhISEM modela colisões granulares como um processo estocástico de Poisson excitando filtros ressonadores de 2ª ordem:   
+
+Decaimento da energia do sistema: shakeEnergy *= systemDecay, realimentada por bloco pela potência de cisalhamento 
+∣
+v
+slip
+∣
+⋅
+F
+shear
+⋅
+z
+∣v 
+slip
+​
+ ∣⋅F 
+shear
+​
+ ⋅ 
+z
+
+​
+  via AudioParam.
+
+Evento estocástico de colisão: se rand() < pCollision(slip, grainSize), então sndLevel += gain * shakeEnergy.
+
+Excitação filtrada: out = biquadResonator(sndLevel * whiteNoise()), seguido de sndLevel *= soundDecay.
+
+Perfis sonoros por bioma: Areia seca usa dois biquads em 2,1 kHz e 4,2 kHz (fricção granular seca) + modo ressonante opcional em 85–95 Hz com harmônico 170–190 Hz quando o carro desliza em encostas >30° (Singing Sand); Lama viscosa usa pulsos de baixa densidade com varredura rápida (350 Hz → 1,4 kHz, reproduzindo sucção/cavitação da borracha descolando); Crosta salina rompendo injeta um transiente impulsivo (600 Hz–5 kHz) no instante da ruptura.   
+
+Integração na Arquitetura Atual: CameraController, VehiclePhysics (acoplado às Prioridades 1 e 3) e evolução do módulo Web Audio para um AudioWorkletProcessor, recebendo telemetria de SandTerramechanics via AudioParam.setTargetAtTime() (zero alocações de memória por frame).
+
+Custo Estimado (modelagem analítica) e Degradação: GPU 0,00 ms; CPU main thread <0,05 ms; thread dedicada de áudio ~0,15 ms por quantum de 2,67 ms (~5,6% da thread de áudio).   
+
+Leve: 2 canais PhISEM (eixo dianteiro + traseiro) + câmera inercial + torque de driveline.
+
+Híbrido / Ultra: 4 canais PhISEM independentes por roda com panorâmica estéreo relativa à câmera + pêndulos secundários (antena/para-barros/carga) + modo Singing Sand em encostas.
+
+Riscos e Armadilhas WebGL2 / Navegadores:
+
+Empacotamento de AudioWorklet e Autoplay no iOS Safari: Retomar audioCtx.resume() dentro de um evento de gesto do usuário, carregar o worklet com new URL(..., import.meta.url) compatível com Vite/bundlers e manter fallback com BiquadFilterNode + ruído branco caso o contexto não suporte AudioWorklet.
+
+Instabilidade em telas de 120 Hz / 144 Hz: Nunca integrar a câmera massa-mola nem o wheel-hop (12,5 Hz) com dt variável de requestAnimationFrame — classe de defeito conhecida por degradar física veicular acima de 60 fps em motores como SnowRunner. Utilizar passo fixo (60 Hz ou 120 Hz) guiado por THREE.Timer (Three.js r187) com clamp de dt ≤ 33 ms.   
+
+Conforto em telas móveis: Expor opção de intensidade reduzida da câmera dinâmica e limitar o FOV pump a ≤ 5° para prevenir desconforto visual em sessões prolongadas.   
+
+Sequência Recomendada de Execução e Orçamento Acumulado
+Executar as cinco prioridades em três sprints sequenciais garante que cada buffer ou variável física alimente o estágio seguinte sem retrabalho, fechando o ciclo no Sprint 3 com a fusão uber-composite TBDR que ajuda a compensar o orçamento mobile:
+
+Sprint	Prioridades Entregues	Dependências Compartilhadas	Salto Perceptivo Imediato	Custo Bruto Acumulado Mobile Híbrido
+Sprint 1	P1 (Carcaça do Pneu + Tire Caking) + P3 (Slip-Sinkage, Rut Trapping, Zonas Heterogêneas, Bow-Wave)	Deflexão δ 
+i
+​
+  e zonas de solo alimentam P1, P2 e P5	A borracha ganha volume/ar reais e o carro passa a "brigar" fisicamente com a areia e com os sulcos	~0,14 ms
+Sprint 2	P2 (AO Analítica + Porosidade + Micro-Shadowing + SSS de Crista) + P5 (Câmera Física + Driveline + PhISEM AudioWorklet)	Reusa ToroidalCascade, depthTexture e telemetria de P3	O pneu ancora visualmente na areia, o sulco ganha profundidade fotográfica e som/câmera vendem 2 toneladas	~0,69 ms
+Sprint 3	P4 (Poeira 6-Way + Soft Depth-Fade + Sombra 128² + Esteira Analítica) + Higiene TBDR (Uber-Composite + Mip Fog)	Separação opaco/transparente (rtOpaque / rtDust) e fusão de pós	Poeira volumétrica com sombra no solo, horizonte coeso e economia TBDR compensando o orçamento	~1,54 ms (antes da economia TBDR)
+Seguindo essa ordem e validando cada sprint com profiling em hardware Mali/Adreno, o DuneFlow deixa de parecer uma demonstração isolada de heightmap deformável para atuar como um simulador off-road coeso no navegador — no qual cada ajuste de PSI, cada engate de 4L, cada encosta de Fesh-Fesh e cada raio solar rasante reforçam a mesma verdade física a 60 fps em desktop e celular.
+
+
+webgl2fundamentals.org
+WebGL2 Cross Platform Issues
+Abre em uma nova janela
+
+
+safeguard.sh
+Tile-Based GPUs Explained: Apple, Mali, Adreno, PowerVR and TBDR
+Abre em uma nova janela
+
+support.arm.com
+Efficient render passes with OpenGL ES - Arm Developer
+Abre em uma nova janela
+
+medium.com
+Efficient Render Passes — On Tile-Based Rendering Hardware
+Abre em uma nova janela
+
+forums.unrealengine.com
+UNmisterIZE - Tire Deformation Plugin — Soft Tire WPO
+Abre em uma nova janela
+
+unity.com
+Realistic smoke lighting with 6-way lighting in VFX Graph - Unity
+Abre em uma nova janela
+
+reddit.com
+Forza Horizon 5 - 14 Minutes of Xbox Series X Direct Feed Gameplay
+Abre em uma nova janela
+
+github.com
+Six-Way Volumetric Lighting Shader for Godot 4 - GitHub
+Abre em uma nova janela
+
+diva-portal.org
+Simulation of Heavy Vehicle Traversal on Deformable Terrain
+Abre em uma nova janela
+
+researchgate.net
+(PDF) Sound synthesis and evaluation of interactive footsteps for
+Abre em uma nova janela
+
+googlechromelabs.github.io
+AudioWorklet | Web Audio Samples
+Abre em uma nova janela
+
+cs.princeton.edu
+Physics-Based Parametric Sound Synthesis - cs.Princeton
+Abre em uma nova janela
+
+beamng.com
+WIP - BeamNG VFX & World Overhaul (Making BeamNG better in
+Abre em uma nova janela
+
+webdev.teknium.io
+Uncommon Web — a field guide to stylistically unusual web libraries
+Abre em uma nova janela
+
+mysimulator.uk
+Physics & Mechanics — 4844 Interactive Simulations |
+Abre em uma nova janela
+
+researchgate.net
+(PDF) Singing Sand Dunes - ResearchGate
+Abre em uma nova janela
+
+researchgate.net
+(PDF) Singing-sand avalanches without dunes - ResearchGate
+Abre em uma nova janela
+
+jagranjosh.com
+What Causes Singing Sand Dunes? Check Here - Jagran Josh
+Abre em uma nova janela
+
+youtube.com
+Rope Simulation in Uncharted 4 and The Last of Us 2 by ... - YouTube
+Abre em uma nova janela
+
+arxiv.org
+Real-Time Rendering of Glinty Appearances using Distributed
+Abre em uma nova janela
+
+dewagumay.files.wordpress.com
+Principles of Soil Physics
+Abre em uma nova janela
+
+researchgate.net
+Slip sinkage effect in soil–vehicle mechanics - ResearchGate
+Abre em uma nova janela
+
+scribd.com
+Lunar Rover Wheel Slip-Sinkage Model | PDF - Scribd
+Abre em uma nova janela
+
+researchgate.net
+(PDF) Terramechanics-based wheel–terrain interaction model and
+Abre em uma nova janela
+
+webthesis.biblio.polito.it
+Modeling and identification of wheel-soil interaction for ... - WebThesis
+Abre em uma nova janela
+
+researchgate.net
+An Overview of the Chrono Soil Contact Model (SCM) Implementation
+Abre em uma nova janela
+
+reddit.com
+Difficulty in SnowRunner vs MudRunner - Reddit
+Abre em uma nova janela
+
+repository.lboro.ac.uk
+Terramechanics and Soil-Wheel Interactions for Road Vehicle
+Abre em uma nova janela
+
+kgsjournal.org
+Assessment of Slip Sinkage of an Off-Road Tracked Vehicle from
+Abre em uma nova janela
+
+gamedeveloper.com
+Mud and Water of Spintires:MudRunner - Game Developer
+Abre em uma nova janela
+
+seblagarde.wordpress.com
+Water drop 3a – Physically based wet surfaces - Sébastien Lagarde
+Abre em uma nova janela
+
+seblagarde.wordpress.com
+rain - Sébastien Lagarde
+Abre em uma nova janela
+
+seblagarde.wordpress.com
+wet surfaces – Sébastien Lagarde
+Abre em uma nova janela
+
+advances.realtimerendering.com
+Uncharted 4 - Advances in Real-Time Rendering in Games
+Abre em uma nova janela
+
+mightyprofessionalgaming.com
+Ambient Occlusion & Global Illumination - Mighty Professional Gaming
+Abre em uma nova janela
+
+cdn2.unrealengine.com
+Real Shading in Unreal Engine 4
+Abre em uma nova janela
+
+media.contentapi.ea.com
+Moving Frostbite to Physically Based Rendering 2.0 - EA
+Abre em uma nova janela
+
+scispace.com
+Ambient occlusion fields - SciSpace
+Abre em uma nova janela
+
+github.com
+GitHub - GameTechDev/XeGTAO: An implementation of [Jimenez et
+Abre em uma nova janela
+
+advances.realtimerendering.com
+Abre em uma nova janela
+
+google.github.io
+Abre em uma nova janela
+
+colinbarrebrisebois.com
+GDC 2011 – Approximating Translucency for a Fast, Cheap and
+Abre em uma nova janela
+
+colinbarrebrisebois.com
+Abre em uma nova janela
+
+alanzucconi.com
+A Journey Into Journey's Sand Shader - Alan Zucconi
+Abre em uma nova janela
+
+summit-2021-sem2.game-lab.nl
+Journey Sand Shader - HVA GPE Game Lab
+Abre em uma nova janela
+
+frostbone25.github.io
+Using Bent Normals in Object Shaders - David Matos
+Abre em uma nova janela
+
+dev.epicgames.com
+Volumetric Clouds | Unreal Engine 4.27 Documentation
+Abre em uma nova janela
+
+kosmonautblog.wordpress.com
+Smooth shadows for Geometry Dust CLouds - kosmonaut's blog
+Abre em uma nova janela
+
+advances.realtimerendering.com
+Real-Time Atmospheric Effects in Games
+Abre em uma nova janela
+
+sebh.github.io
+Production Ready Atmosphere Rendering - Sébastien Hillaire
+Abre em uma nova janela
+
+github.com
+sky/PLAN.md at main - pmndrs - GitHub
+Abre em uma nova janela
+
+raisim.com
+raisin::SkyAtmosphereSystem - RaiSim
+Abre em uma nova janela
+
+blog.maximeheckel.com
+Abre em uma nova janela
+
+advances.realtimerendering.com
+The Technical Art of Uncharted 4
+Abre em uma nova janela
+
+github.com
+react-three-examples/docs/DEMO-INVENTORY.md at main - GitHub
+Abre em uma nova janela
+
+beamng.com
+BeamNG.drive v0.38 Release Notes
+Abre em uma nova janela
+
+gamemath.com
+Mechanics 2: Linear and Rotational Dynamics
+Abre em uma nova janela
+
+github.com
+GitHub - ryanfitzpatrickio/threejs-playground
+Abre em uma nova janela
+
+reddit.com
+Best camera angle in racing games? : r/gamedesign - Reddit
+Abre em uma nova janela
+
+reddit.com
+Reddit told me my camera was too low and tracks were jumpy. I
+Abre em uma nova janela
+
+scribd.com
+Automotive Chassis Layouts Explained | Four Wheel Drive | Vehicles
+Abre em uma nova janela
+
+studylib.net
+Fundamentals of Vehicle Dynamics (Revised Edition) - Studylib
+Abre em uma nova janela
+
+publications.lib.chalmers.se
+Influence of Tyre Inflation Pressure on Fuel Consumption, Vehicle
+Abre em uma nova janela
+
+reddit.com
+Whats the most REALISTIC thing youve noticed and loved about this
+Abre em uma nova janela
+
+github.com
+r187 Milestone · mrdoob/three.js - GitHub
+Abre em uma nova janela
+
+arxiv.org
+[2410.18026] EON: A practical energy-preserving rough diffuse BRDF
+Abre em uma nova janela
+
+arxiv.org
+OpenPBR: Novel Features and Implementation Details - arXiv
+Abre em uma nova janela
+
+medium.com
+Three.js r186: What's New - Medium
+Abre em uma nova janela
+
+muz.li
+Three.js threw its first conference. The best thing on stage was a
+Abre em uma nova janela
+
+proskills.md
+threejs-animation - ProSkills.md
+Abre em uma nova janela
+
+threejsdemos.com
+Three.js Demos — Interactive WebGL Examples & Tutorial
+Abre em uma nova janela
+
+github.com
+pmndrs/postprocessing: A post processing library for three.js. - GitHub
+Abre em uma nova janela
+
+discourse.threejs.org
+Three-mesh-bvh: A plugin for fast geometry raycasting and spatial
+Abre em uma nova janela
+
+deps.dev
+Dependencies | @react-three/drei | npm | Open Source Insights
+Abre em uma nova janela
+
+reddit.com
+Tire deformation shader I'm working on : r/Unity3D - Reddit
+Abre em uma nova janela
+
+isy.gitlab-pages.liu.se
+MECHANICS OF PNEUMATIC TIRES - ISY
+Abre em uma nova janela
+
+vtechworks.lib.vt.edu
+development of an off-road capable tire model for vehicle
+Abre em uma nova janela
+
+reddit.com
+Today I finally got my tire deformation shader right! :) : r/Unity3D
+Abre em uma nova janela
+
+thecontactpatch.com
+C.2015 A simple model for tyre deformation | The Contact Patch
+Abre em uma nova janela
+
+discussions.unity.com
+[FREE] Tire deformation effect - Unity Discussions
+Abre em uma nova janela
+
+seblagarde.wordpress.com
+Abre em uma nova janela
+
+arxiv.org
+Koopman Operator Framework for Modeling and Control of Off-Road
+Abre em uma nova janela
+
+realtimevfx.com
+Huge real-time smoke in game egine
+Abre em uma nova janela
+
+realtimevfx.com
+Solved - 6-way Lightmap Smoke in Unreal - Real Time VFX
+Abre em uma nova janela
+
+stackoverflow.com
+Only array uniforms may have count > 1. Framebuffer in webgl2
+Abre em uma nova janela
+
+github.com
+Better support for blitFramebuffer · Issue #33161 · mrdoob/three.js
+Abre em uma nova janela
+
+web3dsurvey.com
+WebGL 2 Browser Support Statistics | Web3D Survey
+Abre em uma nova janela
+
+discussions.unity.com
+[VFX Graph] Introducing six-way lighting for smoke, dust, and clouds
+Abre em uma nova janela
+
+traxion.gg
+Hands-on with BeamNG.drive's v0.35 update: Rally-ho! - Traxion.GG
+Abre em uma nova janela
+
+researchgate.net
+(PDF) Optimisation of AWD off-road vehicle performance using visco
+Abre em uma nova janela
+
+sonification.de
+Sound Synthesis for Auditory Display - sonification.de
+Abre em uma nova janela
+
+pdfcoffee.com
+Designing Sound - Andy Farnell.pdf - pdfcoffee.com
+Abre em uma nova janela
+
+reddit.com
+What's up with the vehicle physics in this game?! : r/snowrunner
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela
+Abre em uma nova janela

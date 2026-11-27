@@ -1,0 +1,6 @@
+{
+  "name": "DuneFlow — Real-Time Deformable Sand Engine",
+  "description": "Production-architecture real-time deformable sand simulation with dual RGBA16F toroidal cascades, swept segment SDF stamping, 33° anisotropic avalanche relaxation, CDLOD clipmap, OpenPBR EON shading, quartz glints, and CPU Bekker/SCM terramechanics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
